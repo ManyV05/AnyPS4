@@ -2,6 +2,7 @@
 #define RELINKER_DOMAIN_ICALLSITERESOLVER_HPP
 
 #include <relinker/domain/Types.hpp>
+#include <utility>
 #include <vector>
 
 namespace Relinker {
@@ -14,7 +15,8 @@ public:
         const std::vector<std::uint8_t>& textSection,
         FileByteOffset textSectionVAddr,
         VirtualAddress targetGotOrPltAddress,
-        ByteCount targetGotOrPltSize
+        ByteCount targetGotOrPltSize,
+        const std::vector<std::pair<std::size_t, std::size_t>>& skipRanges = {}
     ) = 0;
 };
 

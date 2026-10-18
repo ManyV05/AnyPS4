@@ -75,6 +75,12 @@ inline constexpr std::uint32_t PT_OS_RELRO = 0x61000010;
 
 inline constexpr std::uint32_t PT_LOOS = 0x61000000;
 inline constexpr std::uint32_t PT_HIOS = 0x6fffffff;
+inline constexpr std::uint32_t PT_TLS = 7;
+
+inline constexpr std::uint16_t ET_SCE_EXEC = 0xfe00;
+inline constexpr std::uint16_t ET_SCE_DYNEXEC = 0xfe10;
+inline constexpr std::uint16_t ET_SCE_DYNAMIC = 0xfe18;
+inline constexpr std::uint32_t kSelfMagic = 0x1d3d154f;
 
 inline constexpr std::int64_t DT_DEBUG = 21;
 inline constexpr std::int64_t DT_NULL = 0;
@@ -123,6 +129,10 @@ inline constexpr std::int64_t DT_OS_STRSZ = 0x61000037;
 inline constexpr std::int64_t DT_OS_SYMTAB = 0x61000039;
 inline constexpr std::int64_t DT_OS_SYMENT = 0x6100003b;
 inline constexpr std::int64_t DT_OS_SYMTABSZ = 0x6100003f;
+inline constexpr std::int64_t DT_OS_IMPORT_MODULE = 0x61000045;
+inline constexpr std::int64_t DT_SCE_MODULE_INFO = 0x6100000d;
+inline constexpr std::int64_t DT_SCE_NEEDED_MODULE = 0x6100000f;
+inline constexpr std::int64_t DT_SCE_IMPORT_LIB = 0x61000015;
 
 inline constexpr std::uint32_t R_X86_64_NONE = 0;
 inline constexpr std::uint32_t R_X86_64_64 = 1;

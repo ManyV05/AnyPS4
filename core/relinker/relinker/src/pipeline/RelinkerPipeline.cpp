@@ -2,7 +2,7 @@
 #include <elfpatcher/general/ElfConstants.hpp>
 #include <relinker/analysis/ValidationPolicy.hpp>
 #include <relinker/analysis/UnusedNidFilter/PltCompactor.hpp>
-#include <relinker/analysis/UnusedNidFilter/EhFrameReader.hpp>
+#include <relinker/analysis/CodeExtent.hpp>
 #include <algorithm>
 #include <optional>
 #include <sstream>
@@ -209,9 +209,27 @@ RelinkResult RelinkerPipeline::Relink(const std::vector<std::uint8_t>& sourceElf
 
     std::map<std::uint64_t, std::string> importModules;
     for (const auto& tag : dynTags) {
-        if (tag.Tag == 0x61000045 && !importModules.emplace(tag.Value >> 48, readCStr(tag.Value & 0xffffffffu)).second)
+        if (tag.Tag != DT_OS_IMPORT_MODULE && tag.Tag != DT_SCE_NEEDED_MODULE) continue;
+        if (!importModules.emplace(tag.Value >> 48, readCStr(tag.Value & 0xffffffffu)).second)
             throw RelinkerException("Duplicate import module ID");
     }
+    if (hasTag(DT_SCE_NEEDED_MODULE))
+        std::cout << "Dynamic layout: Orbis (PS4) module and library tags; " << importModules.size() << " needed modules\n";
+
+    auto definedSymbolTarget = [&](const std::uint32_t symIdx, const std::uint32_t relType, const std::int64_t rAddend, std::uint64_t& target) -> bool {
+        if (symIdx == 0 || (relType != R_X86_64_64 && relType != R_X86_64_GLOB_DAT)) return false;
+        const FileByteOffset symOff = dynSymTabOffset + static_cast<FileByteOffset>(symIdx) * symEntSize;
+        if (symOff < dynSymTabOffset || symOff > raw.size() || raw.size() - symOff < symEntSize)
+            throw RelinkerException("Symbol table entry out of bounds", symOff);
+        std::uint16_t section = 0;
+        std::uint64_t value = 0;
+        std::memcpy(&section, raw.data() + symOff + 6, sizeof(section));
+        std::memcpy(&value, raw.data() + symOff + 8, sizeof(value));
+        if (section == 0 || value == 0) return false;
+        target = relType == R_X86_64_64 ? value + static_cast<std::uint64_t>(rAddend) : value;
+        return true;
+    };
+    std::size_t foldedDefinedRelocations = 0;
 
     auto relaEntryPos = [&](const FileByteOffset relaOff, const ByteCount off) -> FileByteOffset {
         if (relaOff > raw.size() || off > raw.size() - relaOff || relaEntSize > raw.size() - relaOff - off)
@@ -241,6 +259,12 @@ RelinkResult RelinkerPipeline::Relink(const std::vector<std::uint8_t>& sourceElf
                 continue;
             }
 
+            std::uint64_t definedTarget = 0;
+            if (definedSymbolTarget(symIdx, relType, rAddend, definedTarget)) {
+                ++foldedDefinedRelocations;
+                continue;
+            }
+
             const FileByteOffset symOff = dynSymTabOffset + static_cast<FileByteOffset>(symIdx) * symEntSize;
             if (symOff < dynSymTabOffset || symOff > raw.size() || raw.size() - symOff < 4)
                 throw RelinkerException("Symbol table entry out of bounds", symOff);
@@ -255,51 +279,29 @@ RelinkResult RelinkerPipeline::Relink(const std::vector<std::uint8_t>& sourceElf
 
     extractRela(dynRelaOffset, dynRelaSize);
     extractRela(dynJmpRelOffset, dynJmpRelSize);
+    if (foldedDefinedRelocations != 0)
+        std::cout << "Defined-symbol relocations folded into RELATIVE: " << foldedDefinedRelocations << "\n";
 
     for (const auto& ref : nidRefs)
         _validationPolicy->ValidateRelocationTypeSupported(ref.RelocationTypeValue, ref.RelocationTableOffset);
 
-    if (std::any_of(programHeaders.begin(), programHeaders.end(), [](const ProgramHeader& ph) { return ph.Type == PT_SCE_DYNLIBDATA; })) {
-        const auto functions = UnusedNidFilter::ReadExceptionFunctions(raw, programHeaders, {}, {});
+    std::map<VirtualAddress, VirtualAddress> codeDataRanges;
+    if (hasSceDynlibData) {
+        const auto layout = AnalyzeCodeLayout(raw, programHeaders, gotVAddr, hasPltRelocations ? dynJmpRelSize : 0);
+        codeDataRanges = layout.DataRanges;
         for (auto& [segment, segmentVAddr, segmentFileOffset] : executableSegments) {
             static_cast<void>(segmentFileOffset);
-            VirtualAddress codeEnd = 0;
-            for (const auto& function : functions)
-                if (function.Begin >= segmentVAddr && function.Begin - segmentVAddr < segment.size())
-                    codeEnd = std::max(codeEnd, function.End);
-            if (codeEnd == 0)
-                continue;
-            if (codeEnd - segmentVAddr > segment.size())
-                throw RelinkerException("Unwind function exceeds executable segment", codeEnd);
-            if (hasPltRelocations && dynJmpRelSize != 0) {
-                const auto target = [&](const std::size_t at) {
-                    std::int32_t displacement = 0;
-                    std::memcpy(&displacement, segment.data() + at + 2, sizeof(displacement));
-                    return segmentVAddr + at + 6 + static_cast<VirtualAddress>(static_cast<std::int64_t>(displacement));
-                };
-                const std::size_t lastFunctionEnd = codeEnd - segmentVAddr;
-                std::optional<std::size_t> plt;
-                for (std::size_t at = lastFunctionEnd; segment.size() >= 16 && at <= segment.size() - 16; ++at) {
-                    if (segment[at] == 0xff && segment[at + 1] == 0x35 && segment[at + 6] == 0xff && segment[at + 7] == 0x25
-                        && target(at) == gotVAddr + 8 && target(at + 6) == gotVAddr + 16) {
-                        plt = at;
-                        break;
-                    }
-                }
-                if (!plt)
-                    throw RelinkerException("PLT not found after the last unwind function", codeEnd);
-                const ByteCount pltSize = 16 * (1 + dynJmpRelSize / relaEntSize);
-                if (pltSize > segment.size() - *plt)
-                    throw RelinkerException("PLT exceeds executable segment", segmentVAddr + *plt);
-                codeEnd = segmentVAddr + *plt + pltSize;
-            }
-            segment.resize(codeEnd - segmentVAddr);
+            for (const auto& header : layout.Headers)
+                if (header.Type == PT_LOAD && (header.Flags & PF_X) != 0 && header.MappedAddress == segmentVAddr && header.FileSize < segment.size())
+                    segment.resize(static_cast<std::size_t>(header.FileSize));
         }
+        if (!codeDataRanges.empty())
+            std::cout << "Jump tables inside code: " << codeDataRanges.size() << "\n";
     }
 
     std::vector<RelinkPatch> syscallPatches;
     for (auto& [segment, segmentVAddr, segmentFileOffset] : executableSegments) {
-        for (const auto offset : _syscallScanner->ScanCodeSectionForSyscalls(segment, segmentVAddr, segment.size())) {
+        for (const auto offset : _syscallScanner->ScanCodeSectionForSyscalls(segment, segmentVAddr, segment.size(), SkipRangesWithin(codeDataRanges, segmentVAddr, segment.size()))) {
             if (offset > segment.size() || segment.size() - offset < 2u)
                 throw RelinkerException("Syscall trap patch exceeds executable segment", segmentVAddr + offset);
             segment[offset] = 0x0F;
@@ -409,6 +411,9 @@ RelinkResult RelinkerPipeline::Relink(const std::vector<std::uint8_t>& sourceElf
             const std::uint32_t relType = static_cast<std::uint32_t>(rInfo & 0xffffffff);
             if (symIdx == 0 && relType == R_X86_64_RELATIVE)
                 appendRela(dynSection.RelaData, rOffset, static_cast<std::uint64_t>(R_X86_64_RELATIVE), rAddend);
+            std::uint64_t definedTarget = 0;
+            if (definedSymbolTarget(symIdx, relType, rAddend, definedTarget))
+                appendRela(dynSection.RelaData, rOffset, static_cast<std::uint64_t>(R_X86_64_RELATIVE), static_cast<std::int64_t>(definedTarget));
         }
     };
 
@@ -431,8 +436,9 @@ RelinkResult RelinkerPipeline::Relink(const std::vector<std::uint8_t>& sourceElf
 
     for (const auto& [segment, segmentVAddr, segmentFileOffset] : executableSegments) {
         static_cast<void>(segmentFileOffset);
+        const auto skipRanges = SkipRangesWithin(codeDataRanges, segmentVAddr, segment.size());
         for (auto& entry : entries) {
-            auto segmentSites = _callSiteResolver->ResolveCallSites(segment, segmentVAddr, entry.TargetOffset, 8);
+            auto segmentSites = _callSiteResolver->ResolveCallSites(segment, segmentVAddr, entry.TargetOffset, 8, skipRanges);
             entry.CallSites.insert(entry.CallSites.end(), segmentSites.begin(), segmentSites.end());
             entry.CallSitesResolved = !entry.CallSites.empty();
         }

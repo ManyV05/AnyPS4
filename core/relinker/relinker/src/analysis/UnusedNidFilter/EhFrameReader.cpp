@@ -173,7 +173,7 @@ private:
         const auto cie = readCie(cieField - cieOffset);
         const auto begin = encoded(position, cie.PointerEncoding);
         const auto size = encoded(position, cie.PointerEncoding & 0x0F);
-        if (begin != expectedBegin || size == 0 || size > std::numeric_limits<VirtualAddress>::max() - begin)
+        if (begin != expectedBegin || size > std::numeric_limits<VirtualAddress>::max() - begin)
             throw RelinkerException("Strict filter: inconsistent FDE function range", address);
         StrictCodeRegion region{begin, begin + size, {}};
         if (cie.Personality != 0) region.ExtraTargets.push_back(cie.Personality);

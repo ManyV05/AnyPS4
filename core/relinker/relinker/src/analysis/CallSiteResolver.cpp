@@ -67,20 +67,20 @@ std::size_t mov64DispOffset(const std::vector<std::uint8_t>& text, const Codegen
 
 class CallSiteResolver : public ICallSiteResolver {
 public:
-    std::vector<FileByteOffset> ResolveCallSites(const std::vector<std::uint8_t>& textSection, FileByteOffset textSectionVAddr, VirtualAddress targetGotOrPltAddress, ByteCount targetGotOrPltSize) override;
+    std::vector<FileByteOffset> ResolveCallSites(const std::vector<std::uint8_t>& textSection, FileByteOffset textSectionVAddr, VirtualAddress targetGotOrPltAddress, ByteCount targetGotOrPltSize, const std::vector<std::pair<std::size_t, std::size_t>>& skipRanges) override;
 private:
     const std::vector<std::uint8_t>* _cachedTextPtr = nullptr;
     std::multimap<VirtualAddress, FileByteOffset> _cachedTargetToInstr;
     FileByteOffset _cachedTextVAddr = 0;
 };
 
-std::vector<FileByteOffset> CallSiteResolver::ResolveCallSites(const std::vector<std::uint8_t>& textSection, const FileByteOffset textSectionVAddr, const VirtualAddress targetGotOrPltAddress, const ByteCount targetGotOrPltSize) {
+std::vector<FileByteOffset> CallSiteResolver::ResolveCallSites(const std::vector<std::uint8_t>& textSection, const FileByteOffset textSectionVAddr, const VirtualAddress targetGotOrPltAddress, const ByteCount targetGotOrPltSize, const std::vector<std::pair<std::size_t, std::size_t>>& skipRanges) {
     if (targetGotOrPltSize > std::numeric_limits<VirtualAddress>::max() - targetGotOrPltAddress)
         throw RelinkerException("Relocation target range exceeds the address space");
     if (textSection.empty()) return {};
     if (_cachedTextPtr != &textSection || _cachedTextVAddr != textSectionVAddr) {
         auto scanner = Codegen::MakeInstructionScanner();
-        auto instructions = scanner->ScanCodeSection(textSection, 0, textSection.size());
+        auto instructions = scanner->ScanCodeSection(textSection, 0, textSection.size(), skipRanges);
         _cachedTargetToInstr.clear();
         for (const auto& m : instructions) {
             std::size_t dispOff = 0;

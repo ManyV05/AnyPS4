@@ -12,24 +12,36 @@ public:
     [[nodiscard]] std::vector<InstructionMatch> ScanCodeSection(
         const std::vector<std::uint8_t>& codeSection,
         Domain::FileByteOffset codeSectionOffset,
-        Domain::FileByteOffset codeSectionSize
+        Domain::FileByteOffset codeSectionSize,
+        const SkipRanges& skipRanges
     ) const override;
 };
 
 std::vector<InstructionMatch> InstructionScanner::ScanCodeSection(
     const std::vector<std::uint8_t>& codeSection,
     const Domain::FileByteOffset codeSectionOffset,
-    const Domain::FileByteOffset codeSectionSize
+    const Domain::FileByteOffset codeSectionSize,
+    const SkipRanges& skipRanges
 ) const {
     const std::size_t limit = std::min(codeSection.size(), static_cast<std::size_t>(codeSectionSize));
+    for (std::size_t index = 0; index < skipRanges.size(); ++index) {
+        if (skipRanges[index].first > skipRanges[index].second || (index != 0 && skipRanges[index].first < skipRanges[index - 1].second))
+            throw CodegenException("Skip ranges must be sorted and disjoint", codeSectionOffset + skipRanges[index].first);
+    }
 
     const X64InstructionDecoder decoder;
     std::vector<InstructionMatch> matches;
     std::size_t i = 0;
+    std::size_t skipIndex = 0;
 
     while (i < limit) {
+        while (skipIndex < skipRanges.size() && skipRanges[skipIndex].second <= i) ++skipIndex;
+        if (skipIndex < skipRanges.size() && skipRanges[skipIndex].first <= i) {
+            i = std::min(limit, skipRanges[skipIndex].second);
+            continue;
+        }
         const std::uint8_t* cursor = codeSection.data() + i;
-        const std::size_t available = limit - i;
+        const std::size_t available = (skipIndex < skipRanges.size() ? std::min(limit, skipRanges[skipIndex].first) : limit) - i;
 
         std::size_t length = 0;
         try {

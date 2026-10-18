@@ -15,7 +15,8 @@ public:
     [[nodiscard]] virtual std::vector<InstructionMatch> ScanCodeSection(
         const std::vector<std::uint8_t>& codeSection,
         Domain::FileByteOffset codeSectionOffset,
-        Domain::FileByteOffset codeSectionSize
+        Domain::FileByteOffset codeSectionSize,
+        const SkipRanges& skipRanges = {}
     ) const = 0;
 };
 

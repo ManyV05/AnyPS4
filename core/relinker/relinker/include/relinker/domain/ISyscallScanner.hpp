@@ -3,6 +3,7 @@
 
 #include <relinker/domain/Types.hpp>
 #include <cstddef>
+#include <utility>
 #include <vector>
 
 namespace Relinker {
@@ -14,7 +15,8 @@ public:
     virtual std::vector<std::size_t> ScanCodeSectionForSyscalls(
         const std::vector<std::uint8_t>& codeSection,
         FileByteOffset codeSectionOffset,
-        FileByteOffset codeSectionSize
+        FileByteOffset codeSectionSize,
+        const std::vector<std::pair<std::size_t, std::size_t>>& skipRanges = {}
     ) = 0;
 };
 

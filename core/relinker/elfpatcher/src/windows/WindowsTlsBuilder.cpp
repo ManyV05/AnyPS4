@@ -2,6 +2,7 @@
 #include <elfpatcher/windows/WindowsStubEmitter.hpp>
 #include <elfpatcher/windows/WindowsTlsTemplateBuilder.hpp>
 #include <codegen/x86/X64InstructionDecoder.hpp>
+#include <codegen/CodegenException.hpp>
 #include <relinker/analysis/CodeInstructionCollector.hpp>
 #include <io/BufferUtils.hpp>
 #include <algorithm>
@@ -110,7 +111,12 @@ PeDirectory WindowsTlsBuilder::Build(const std::vector<std::uint8_t>& source, co
         for (auto instruction = instructions.lower_bound(header.MappedAddress); instruction != instructions.end() && *instruction - header.MappedAddress < header.FileSize; ++instruction) {
             const auto offset = *instruction - header.MappedAddress;
             const auto* bytes = source.data() + header.Offset + offset;
-            const auto info = decoder.DecodeInstruction(bytes, header.FileSize - offset);
+            Codegen::DecodedInstructionInfo info;
+            try {
+                info = decoder.DecodeInstruction(bytes, header.FileSize - offset);
+            } catch (const Codegen::CodegenException& error) {
+                throw Domain::RelinkerException(std::string("Windows guest TLS scan: ") + error.what(), header.MappedAddress + offset);
+            }
             const auto rva = image.GetRva(header.MappedAddress + offset, info.Length);
             const bool insidePrevious = *instruction < decodedEnd;
             decodedEnd = std::max(decodedEnd, *instruction + info.Length);

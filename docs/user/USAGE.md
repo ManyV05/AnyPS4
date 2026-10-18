@@ -2,7 +2,7 @@
 
 ## Input and conversion
 
-Use a clean ELF executable. Place its bundled ELF modules in `sce_module/`, `sce_modules/`, or `prx/` beside the input executable, or under the parent directory selected with `--sce-module-path <path>`. The option accepts absolute paths and paths relative to the current working directory; do not include the `sce_module` directory itself. Only files directly inside the module directories are processed. A bundled module in a SELF container is an error, as the executable is. `prx/` can coexist with either `sce_module/` or `sce_modules/`. Both `sce_module/` and `sce_modules/` present, or all three absent, is an error.
+Use a clean ELF executable, or a decrypted PS4 `eboot.bin` in a fake SELF container (magic `4F 15 3D 1D` with unencrypted, uncompressed segments): the relinker unwraps the container into its ELF image before conversion and promotes a standalone `PT_SCE_RELRO` segment to a writable `PT_LOAD` so the GOT it holds is mapped. See [ORBIS.md](../dev/ORBIS.md) for the PS4 input layout. Place its bundled ELF modules in `sce_module/`, `sce_modules/`, or `prx/` beside the input executable, or under the parent directory selected with `--sce-module-path <path>`. The option accepts absolute paths and paths relative to the current working directory; do not include the `sce_module` directory itself. Only files directly inside the module directories are processed. A bundled module in a SELF container is skipped, and an encrypted or compressed SELF executable is an error. `prx/` can coexist with either `sce_module/` or `sce_modules/`. Both `sce_module/` and `sce_modules/` present, or all three absent, is an error.
 
 ```text
 source/

@@ -130,7 +130,8 @@ public:
     std::vector<std::size_t> ScanCodeSectionForSyscalls(
         const std::vector<std::uint8_t>& codeSection,
         FileByteOffset codeSectionOffset,
-        FileByteOffset codeSectionSize) override;
+        FileByteOffset codeSectionSize,
+        const std::vector<std::pair<std::size_t, std::size_t>>& skipRanges) override;
 
 private:
     bool _trapSdkStubs;
@@ -139,11 +140,12 @@ private:
 std::vector<std::size_t> SyscallScanner::ScanCodeSectionForSyscalls(
     const std::vector<std::uint8_t>& codeSection,
     const FileByteOffset codeSectionOffset,
-    const FileByteOffset codeSectionSize) {
+    const FileByteOffset codeSectionSize,
+    const std::vector<std::pair<std::size_t, std::size_t>>& skipRanges) {
     const std::size_t limit = std::min(codeSection.size(), static_cast<std::size_t>(codeSectionSize));
 
     const auto scanner = Codegen::MakeInstructionScanner();
-    const auto matches = scanner->ScanCodeSection(codeSection, codeSectionOffset, codeSectionSize);
+    const auto matches = scanner->ScanCodeSection(codeSection, codeSectionOffset, codeSectionSize, skipRanges);
 
     std::vector<std::size_t> trapped;
     for (std::size_t index = 0; index < matches.size(); ++index) {
@@ -185,7 +187,8 @@ public:
     std::vector<std::size_t> ScanCodeSectionForSyscalls(
         const std::vector<std::uint8_t>&,
         FileByteOffset,
-        FileByteOffset
+        FileByteOffset,
+        const std::vector<std::pair<std::size_t, std::size_t>>&
     ) override { return {}; }
 };
 

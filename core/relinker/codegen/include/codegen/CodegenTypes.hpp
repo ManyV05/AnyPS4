@@ -4,6 +4,7 @@
 #include <codegen/x86/Amd64OnlySubstitutionTypes.hpp>
 #include <domain/Types.hpp>
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 namespace Codegen {
@@ -12,6 +13,8 @@ struct InstructionMatch {
     Domain::FileByteOffset Offset;
     std::size_t Length;
 };
+
+using SkipRanges = std::vector<std::pair<std::size_t, std::size_t>>;
 
 struct RewriteRequest {
     Domain::FileByteOffset Offset;

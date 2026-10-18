@@ -1,9 +1,12 @@
 #include <relinker/analysis/UnusedNidFilter/IControlFlowGraph.hpp>
 #include <codegen/x86/X64InstructionDecoder.hpp>
 #include <codegen/CodegenException.hpp>
+#include <iterator>
+#include <map>
 #include <unordered_map>
 #include <queue>
 #include <cstring>
+#include <string>
 
 namespace Relinker::UnusedNidFilter {
 
@@ -37,9 +40,15 @@ void buildGraph(
     const IRelativeRelocationIndex& relativeRelocations,
     const std::vector<StrictDataRegion>* data,
     bool followCodeAddresses,
-    std::unordered_set<VirtualAddress>& reachable
+    std::unordered_set<VirtualAddress>& reachable,
+    const std::map<VirtualAddress, VirtualAddress>* excludedRanges
 ) {
     const Codegen::X64InstructionDecoder decoder;
+    const auto excluded = [&](VirtualAddress va) {
+        if (excludedRanges == nullptr || excludedRanges->empty()) return false;
+        const auto next = excludedRanges->upper_bound(va);
+        return next != excludedRanges->begin() && std::prev(next)->second > va;
+    };
     std::unordered_set<VirtualAddress> visited;
     std::queue<VirtualAddress> worklist;
     std::vector<VirtualAddress> addressTaken;
@@ -48,6 +57,7 @@ void buildGraph(
     auto enqueue = [&](VirtualAddress va) {
         if (reachable.count(va) > 0) return;
         if (va < textVaddr || va >= textVaddr + static_cast<VirtualAddress>(text.size())) return;
+        if (excluded(va)) return;
         if (!visited.insert(va).second) return;
         worklist.push(va);
     };
@@ -89,7 +99,11 @@ void buildGraph(
                 continue;
             }
         } else {
-            info = decoder.DecodeInstruction(text.data() + bufOff, available);
+            try {
+                info = decoder.DecodeInstruction(text.data() + bufOff, available);
+            } catch (const Codegen::CodegenException& error) {
+                throw RelinkerException(std::string("CFG: reachable instruction: ") + error.what(), va);
+            }
         }
         reachable.insert(va);
 
@@ -168,9 +182,10 @@ std::unique_ptr<IControlFlowGraph> BuildControlFlowGraph(
     const std::vector<VirtualAddress>& extraEntries,
     const IRelativeRelocationIndex& relativeRelocations,
     bool followCodeAddresses,
-    std::unordered_set<VirtualAddress>& reachable
+    std::unordered_set<VirtualAddress>& reachable,
+    const std::map<VirtualAddress, VirtualAddress>* excludedRanges
 ) {
-    buildGraph(text, textVaddr, entryVaddr, extraEntries, relativeRelocations, nullptr, followCodeAddresses, reachable);
+    buildGraph(text, textVaddr, entryVaddr, extraEntries, relativeRelocations, nullptr, followCodeAddresses, reachable, excludedRanges);
     return std::make_unique<ControlFlowGraph>(&reachable);
 }
 
@@ -207,7 +222,7 @@ std::unique_ptr<IControlFlowGraph> BuildAddressTakenControlFlowGraph(
     const std::vector<StrictDataRegion>& data
 ) {
     std::unordered_set<VirtualAddress> reachable;
-    buildGraph(std::span<const std::uint8_t>(text.data(), text.size()), textVaddr, entryVaddr, extraEntries, relativeRelocations, &data, false, reachable);
+    buildGraph(std::span<const std::uint8_t>(text.data(), text.size()), textVaddr, entryVaddr, extraEntries, relativeRelocations, &data, false, reachable, nullptr);
     return std::make_unique<ControlFlowGraph>(std::move(reachable));
 }
 

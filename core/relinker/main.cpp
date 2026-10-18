@@ -13,6 +13,7 @@
 #include <io/ByteWriter.hpp>
 #include <io/FileWriter.hpp>
 #include <relinker/parsing/ElfReader.hpp>
+#include <relinker/parsing/OrbisInput.hpp>
 #include <relinker/analysis/ValidationPolicy.hpp>
 #include <relinker/analysis/SyscallScanner.hpp>
 #include <relinker/analysis/CallSiteResolver.hpp>
@@ -60,6 +61,9 @@ int Run(const int argc, char* argv[]) {
         Io::FileWriter fileWriter;
 
         auto sourceBytes = fileReader.Read(args.inputPath);
+        const auto orbisInput = Relinker::PrepareOrbisInput(sourceBytes);
+        if (orbisInput.UnwrappedSelf) std::cout << "Input: fake SELF container with " << orbisInput.SelfSegmentCount << " segments unwrapped into a " << sourceBytes.size() << "-byte ELF image\n";
+        if (orbisInput.PromotedRelroSegments != 0) std::cout << "Input: " << orbisInput.PromotedRelroSegments << " standalone PT_SCE_RELRO segment(s) promoted to writable PT_LOAD\n";
         if (std::filesystem::exists(Io::NativePath(args.outputPath)) && std::filesystem::equivalent(Io::NativePath(args.inputPath), Io::NativePath(args.outputPath)))
             throw Domain::RelinkerException("Executable output would overwrite the input executable");
         const std::string absPath = Io::Utf8Path(std::filesystem::absolute(Io::NativePath(args.outputPath)));
