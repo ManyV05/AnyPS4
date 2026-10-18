@@ -454,6 +454,17 @@ def implemented_stub(file_name: str, record: dict, nid: str) -> str:
             f'OrbisHleTrace("{file_name}", "{record["display"]}", "{nid}", ++calls, __builtin_return_address(0)); {body} }}')
 
 
+STUB_EXTERNAL: dict[str, str] = {
+    "sceNgs2ParseWaveformData": "orbis_sceNgs2ParseWaveformData",
+    "sceNgs2SystemCreateWithAllocator": "orbis_sceNgs2SystemCreateWithAllocator",
+    "sceNgs2RackCreateWithAllocator": "orbis_sceNgs2RackCreateWithAllocator",
+    "sceNgs2RackGetVoiceHandle": "orbis_sceNgs2RackGetVoiceHandle",
+    "sceNgs2VoiceGetState": "orbis_sceNgs2VoiceGetState",
+    "sceNgs2VoiceGetStateFlags": "orbis_sceNgs2VoiceGetStateFlags",
+}
+
+IMPLEMENTATION_DIR = Path(__file__).resolve().parent / "orbis_impl"
+
 STUB_RETURNS: dict[str, str] = {
     "sceNpTrophyCreateContext": "0x80551601",
     "sceNpTrophyCreateHandle": "0x80551601",
@@ -484,6 +495,8 @@ def write_stub_module(out: Path, file_name: str, nids: dict[str, dict]) -> None:
         elif record["display"] in STUB_IMPLEMENTATIONS:
             lines.append(implemented_stub(file_name, record, nid))
             definitions.append(f'    "{nid}" = {record["name"]}')
+        elif record["display"] in STUB_EXTERNAL and (IMPLEMENTATION_DIR / f"{stem}.cpp").exists():
+            definitions.append(f'    "{nid}" = {STUB_EXTERNAL[record["display"]]}')
         elif record["display"] in STUB_RETURNS:
             lines.append(f'ORBIS_HLE_STUB_RETURNING("{file_name}", {record["name"]}, "{record["display"]}", "{nid}", {STUB_RETURNS[record["display"]]})')
             definitions.append(f'    "{nid}" = {record["name"]}')
@@ -612,10 +625,12 @@ def write_cmake(out: Path, files: list[str], real: dict[str, ProsperoLibrary], v
         suffix = file_name[file_name.rfind("."):] if "." in file_name else ".prx"
         library = real.get(file_name)
         if library is None:
+            external = [f"        ${{CMAKE_SOURCE_DIR}}/tools/orbis_impl/{stem}.cpp"] if (IMPLEMENTATION_DIR / f"{stem}.cpp").exists() else []
             lines += [
                 f"add_library(orbis_{stem} SHARED",
                 f"        ${{CMAKE_CURRENT_SOURCE_DIR}}/{stem}/{stem}.cpp",
                 f"        ${{CMAKE_CURRENT_SOURCE_DIR}}/{stem}/{stem}.def",
+            ] + external + [
                 "        $<TARGET_OBJECTS:orbis_hle_common>)",
                 f"target_include_directories(orbis_{stem} PRIVATE ${{CMAKE_CURRENT_SOURCE_DIR}})",
                 f"target_compile_features(orbis_{stem} PRIVATE cxx_std_20)",
