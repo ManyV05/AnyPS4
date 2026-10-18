@@ -141,9 +141,19 @@ void ApplicationHeapInitialize_nid_no_patch(const void* processParameters) {
         try {
             if (read<std::uint64_t>(processParameters, 0) < 0x40 || read<std::uint32_t>(processParameters, 8) != 0x4942524f) throw std::runtime_error("application heap: invalid process parameters");
             const auto* libcParameters = read<const void*>(processParameters, 0x38);
-            if (read<std::uint64_t>(libcParameters, 0) < 0x38) throw std::runtime_error("application heap: invalid libc parameters");
-            const auto* replacement = read<const void*>(libcParameters, 0x30);
-            if (read<std::uint64_t>(replacement, 0) != 0x78 || read<std::uint64_t>(replacement, 8) != 2) throw std::runtime_error("application heap: unsupported allocator replacement table");
+            const void* replacement = nullptr;
+            if (libcParameters != nullptr) {
+                if (read<std::uint64_t>(libcParameters, 0) < 0x38) throw std::runtime_error("application heap: invalid libc parameters");
+                replacement = read<const void*>(libcParameters, 0x30);
+            }
+            if (replacement == nullptr) {
+                std::array<void*, 10> none{};
+                ApplicationHeapRegister_nid_no_patch(none.data());
+                return;
+            }
+            const auto replacementSize = read<std::uint64_t>(replacement, 0);
+            const auto replacementVersion = read<std::uint64_t>(replacement, 8);
+            if (!((replacementSize == 0x78 && replacementVersion == 2) || (replacementSize == 0x70 && replacementVersion == 1))) throw std::runtime_error("application heap: unsupported allocator replacement table");
             std::array<void*, 10> api;
             std::memcpy(api.data(), static_cast<const std::byte*>(replacement) + 0x20, sizeof(api));
             ApplicationHeapRegister_nid_no_patch(api.data());

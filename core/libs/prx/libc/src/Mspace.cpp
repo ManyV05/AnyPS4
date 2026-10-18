@@ -15,6 +15,7 @@ extern "C" int* APS5_VABI __error_nid_postfix();
 namespace {
 
 constexpr unsigned MspaceThreadUnsafe = 1;
+constexpr unsigned MspaceOrbisDebugFlags = 0x6;
 constexpr std::uintptr_t Granule = 16;
 constexpr std::uintptr_t MinimumAlignment = 32;
 constexpr std::uintptr_t ArenaHeaderBytes = 64;
@@ -157,7 +158,7 @@ void* APS5_VABI sceLibcMspaceCreate_nid_postfix(const char* name, void* base,
     (void)name;
     const auto start = reinterpret_cast<std::uintptr_t>(base);
     if (!base || (start & (Granule - 1)) || size < ArenaHeaderBytes + 2 * Granule ||
-        size > std::numeric_limits<std::uintptr_t>::max() - start || (flags & ~MspaceThreadUnsafe) != 0) {
+        size > std::numeric_limits<std::uintptr_t>::max() - start || (flags & ~(MspaceThreadUnsafe | MspaceOrbisDebugFlags)) != 0) {
         Error(22);
         return nullptr;
     }

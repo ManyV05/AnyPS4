@@ -82,6 +82,13 @@ int HostPoll(KernelSocketPoll::Entry* descriptors, std::size_t count, int timeou
     return result;
 }
 
+#else
+
+int HostPoll(KernelSocketPoll::Entry* descriptors, std::size_t count, int) {
+    for (std::size_t index = 0; index < count; ++index) descriptors[index].revents = descriptors[index].events;
+    return static_cast<int>(count);
+}
+
 #endif
 
 }
