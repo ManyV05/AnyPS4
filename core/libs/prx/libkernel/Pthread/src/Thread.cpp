@@ -227,6 +227,14 @@ static void BindHostCpuClock(PthreadPrivate* self) {
 #endif
 }
 
+static bool IsLiveGuestThread(const PthreadPrivate* thread) {
+    auto& registry = CpuClocks();
+    std::lock_guard lock(registry.lock);
+    for (const auto& [id, live] : registry.threads)
+        if (live == thread) return true;
+    return false;
+}
+
 int GuestThreadCpuClockId(const PthreadPrivate* thread) {
     return static_cast<int>(CPU_CLOCK_BIT | static_cast<std::uint32_t>(thread->cpuClockThread));
 }
@@ -619,6 +627,7 @@ int APS5_VABI scePthreadCreate(Pthread* thread, const PthreadAttr* attr, Pthread
 
 int APS5_VABI scePthreadJoin(Pthread thread, void** retval) {
     if (!thread) throw std::runtime_error("scePthreadJoin: null thread");
+    if (!IsLiveGuestThread(thread)) return SCE_KERNEL_ERROR_ESRCH;
     if (thread->_detached) return SCE_KERNEL_ERROR_EINVAL;
     if (thread == CurrentGuestState().current)
         throw std::runtime_error("scePthreadJoin: cannot join current thread");
