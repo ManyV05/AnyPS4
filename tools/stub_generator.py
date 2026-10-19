@@ -470,6 +470,16 @@ STUB_IMPLEMENTATIONS: dict[str, tuple[str, str, str]] = {
     "sceUserServiceGetUserName": ("std::int32_t", "std::int32_t, char* name, std::size_t size",
                                   "if (name != nullptr && size != 0) { const char* text = \"Player\"; std::size_t index = 0; while (text[index] != 0 && index + 1 < size) { name[index] = text[index]; ++index; } name[index] = 0; } return 0;"),
     "scePlayGoOpen": ("std::int32_t", "std::int32_t* handle, const void*", "if (handle != nullptr) *handle = 1; return 0;"),
+    "sceNpTrophyCreateContext": ("std::int32_t", "std::int32_t* context, std::int32_t, std::uint32_t, std::uint64_t", "if (context != nullptr) *context = 1; return 0;"),
+    "sceNpTrophyCreateHandle": ("std::int32_t", "std::int32_t* handle", "if (handle != nullptr) *handle = 1; return 0;"),
+    "sceNpTrophyRegisterContext": ("std::int32_t", "std::int32_t, std::int32_t, std::uint64_t", "return 0;"),
+    "sceNpTrophyDestroyContext": ("std::int32_t", "std::int32_t", "return 0;"),
+    "sceNpTrophyDestroyHandle": ("std::int32_t", "std::int32_t", "return 0;"),
+    "sceNpTrophyAbortHandle": ("std::int32_t", "std::int32_t", "return 0;"),
+    "sceNpTrophyGetGameInfo": ("std::int32_t", "std::int32_t, std::int32_t, std::uint8_t* details, std::uint8_t* data",
+                               "if (details != nullptr) { const std::size_t size = *reinterpret_cast<const std::size_t*>(details); if (size != 0 && size <= 4096) { std::memset(details + 8, 0, size - 8); } } if (data != nullptr) { const std::size_t size = *reinterpret_cast<const std::size_t*>(data); if (size != 0 && size <= 4096) { std::memset(data + 8, 0, size - 8); } } return 0;"),
+    "sceNpTrophyGetTrophyUnlockState": ("std::int32_t", "std::int32_t, std::int32_t, std::uint8_t* flags, std::uint32_t* count", "if (flags != nullptr) std::memset(flags, 0, 16); if (count != nullptr) *count = 0; return 0;"),
+    "sceNpTrophyUnlockTrophy": ("std::int32_t", "std::int32_t, std::int32_t, std::int32_t, std::int32_t* platinumId", "if (platinumId != nullptr) *platinumId = -1; return 0;"),
     "scePlayGoGetLocus": ("std::int32_t", "std::int32_t, const std::uint16_t*, std::uint32_t count, std::int8_t* loci",
                           "if (loci == nullptr) return static_cast<std::int32_t>(0x80B20002); for (std::uint32_t k = 0; k < count; ++k) loci[k] = 3; return 0;"),
     "scePlayGoGetProgress": ("std::int32_t", "std::int32_t, const std::uint16_t*, std::uint32_t, std::uint64_t* progress",
@@ -535,17 +545,6 @@ EXTERNAL_LINK_LIBRARIES: dict[str, list[str]] = {
 IMPLEMENTATION_DIR = Path(__file__).resolve().parent / "orbis_impl"
 
 STUB_RETURNS: dict[str, str] = {
-    "sceNpTrophyCreateContext": "0x80551601",
-    "sceNpTrophyCreateHandle": "0x80551601",
-    "sceNpTrophyRegisterContext": "0x80551601",
-    "sceNpTrophyGetGameInfo": "0x80551601",
-    "sceNpTrophyUnlockTrophy": "0x80551601",
-    "sceNpTrophyDestroyContext": "0x80551601",
-    "sceNpTrophyDestroyHandle": "0x80551601",
-    "sceNpTrophyGetTrophyUnlockState": "0x80551601",
-    "sceNpTrophyAbortHandle": "0x80551601",
-    "sceNpTrophyGetTrophyInfo": "0x80551601",
-    "sceNpTrophyGetGroupInfo": "0x80551601",
     "sceSystemServiceReceiveEvent": "0x80A10004",
 }
 
@@ -555,7 +554,7 @@ def write_stub_module(out: Path, file_name: str, nids: dict[str, dict]) -> None:
     directory = out / stem
     directory.mkdir(parents=True, exist_ok=True)
     definitions = [f"LIBRARY {file_name}", "EXPORTS"]
-    lines = ["#include <common/OrbisHle.hpp>", "#include <cstddef>", "", 'extern "C" {', ""]
+    lines = ["#include <common/OrbisHle.hpp>", "#include <cstddef>", "#include <cstring>", "", 'extern "C" {', ""]
     for nid, record in nids.items():
         if record["kind"] == "object":
             lines.append(f'ORBIS_HLE_OBJECT({record["name"]})')

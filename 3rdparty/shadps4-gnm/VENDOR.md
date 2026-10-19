@@ -12,3 +12,9 @@ Local changes to vendored files:
 - `core/libraries/gnmdriver/gnmdriver.cpp`: `RegisterLib` does not create the Vulkan presenter under `ANYPS4_HEADLESS` and binds the headless VideoOut port.
 
 Local change (phase 3.2): `liverpool.cpp` performs memory fills and memory-to-memory `DMA_DATA` transfers on the CPU when there is no rasterizer (`HeadlessDmaData`, under `ANYPS4_HEADLESS`), since titles wait for those copies.
+
+## Phase 3.3 (renderer)
+
+Added verbatim from the same fork (commit `354faa475753f53332a7d53a5feefbc98e1665f5`): `video_core/renderer_vulkan` (without the presenter, swapchain and host passes, which present through Dear ImGui and SDL), `video_core/texture_cache`, `video_core/buffer_cache`, `page_manager`, `cache_storage`, `host_shaders` (GLSL; the string headers are generated into `generated/` by `tools`' vendoring script, a port of `StringShaderHeader.cmake`), the whole `shader_recompiler`, the `common` headers and the sources they need, `core/signals.h`, `core/libraries/videoout/buffer.h` and `core/libraries/kernel/memory.h`. External libraries (Boost, Vulkan-Headers, VMA, sirit, glslang, Zydis, xxHash, half, robin-map, xbyak, gcn, json, miniz) are taken from the shadPS4 checkout named by `ANYPS4_SHADPS4_EXTERNALS`, not copied.
+
+`adapter/Renderer.cpp` replaces the presenter: a headless `Vulkan::Instance`, a `Scheduler` and the `Rasterizer` are created on the first submit, and at flip time the video-out image is read back from the texture cache into the Win32 window of `libSceVideoOut.prx`. `adapter/Signals.cpp` implements `Core::SignalDispatch` with a vectored exception handler; `adapter/Runtime.cpp` implements the `MemoryManager` facade (`VirtualQuery`/`VirtualProtect`) the caches use.

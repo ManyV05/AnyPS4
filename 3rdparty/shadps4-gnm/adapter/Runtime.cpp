@@ -2,16 +2,31 @@
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
 #include "core/memory.h"
+#include "core/libraries/videoout/buffer.h"
 #include "core/libraries/videoout/driver.h"
 #include "core/libraries/videoout/video_out.h"
 #include "common/logging/log.h"
 #include "core/platform.h"
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cstring>
 #include <mutex>
 #include <thread>
 #include <windows.h>
+
+namespace AnyPs4 {
+struct ReadbackFrame {
+    const void* pixels;
+    u32 width;
+    u32 height;
+    u32 stride;
+    bool swap_red_blue;
+};
+bool RendererReady();
+bool ReadbackFlip(const Libraries::VideoOut::BufferAttribute& attribute, VAddr address, ReadbackFrame& out);
+} // namespace AnyPs4
 
 extern "C" void OrbisHleTrace(const char* module, const char* function, const char* nid, std::uint64_t calls, const void* site);
 
@@ -47,6 +62,108 @@ uintptr_t AddressSpace::SystemReservedVirtualBase() {
 
 size_t AddressSpace::SystemReservedVirtualSize() {
     return ReservedSize;
+}
+
+void AddressSpace::Protect(VAddr virtual_addr, u64 size, MemoryPermission perms) {
+    DWORD protect = PAGE_NOACCESS;
+    const bool read = True(perms & MemoryPermission::Read);
+    const bool write = True(perms & MemoryPermission::Write);
+    const bool exec = True(perms & MemoryPermission::Execute);
+    if (write) {
+        protect = exec ? PAGE_EXECUTE_READWRITE : PAGE_READWRITE;
+    } else if (read) {
+        protect = exec ? PAGE_EXECUTE_READ : PAGE_READONLY;
+    } else if (exec) {
+        protect = PAGE_EXECUTE;
+    }
+    DWORD previous = 0;
+    if (!VirtualProtect(reinterpret_cast<void*>(virtual_addr), size, protect, &previous)) {
+        LOG_ERROR(Core, "VirtualProtect({:#x}, {:#x}, {:#x}) failed: {}", virtual_addr, size, protect, GetLastError());
+    }
+}
+
+namespace {
+
+bool QueryRegion(VAddr address, MEMORY_BASIC_INFORMATION& info) {
+    return VirtualQuery(reinterpret_cast<const void*>(address), &info, sizeof info) == sizeof info;
+}
+
+bool Committed(const MEMORY_BASIC_INFORMATION& info) {
+    return info.State == MEM_COMMIT && (info.Protect & PAGE_GUARD) == 0;
+}
+
+} // namespace
+
+bool MemoryManager::IsValidMapping(VAddr virtual_addr, u64 size) {
+    MEMORY_BASIC_INFORMATION info{};
+    VAddr cursor = virtual_addr;
+    const VAddr end = virtual_addr + (size == 0 ? 1 : size);
+    while (cursor < end) {
+        if (!QueryRegion(cursor, info) || !Committed(info)) {
+            return false;
+        }
+        cursor = reinterpret_cast<VAddr>(info.BaseAddress) + info.RegionSize;
+    }
+    return true;
+}
+
+u64 MemoryManager::ClampRangeSize(VAddr virtual_addr, u64 size) {
+    static constexpr u64 MinSizeToClamp = 1ull << 30;
+    if (size < MinSizeToClamp) {
+        return size;
+    }
+    MEMORY_BASIC_INFORMATION info{};
+    VAddr cursor = virtual_addr;
+    while (cursor < virtual_addr + size && QueryRegion(cursor, info) && Committed(info)) {
+        cursor = reinterpret_cast<VAddr>(info.BaseAddress) + info.RegionSize;
+    }
+    return std::min<u64>(size, cursor - virtual_addr);
+}
+
+void MemoryManager::CopySparseMemory(VAddr virtual_addr, u8* dest, u64 size) {
+    MEMORY_BASIC_INFORMATION info{};
+    while (size != 0) {
+        if (!QueryRegion(virtual_addr, info)) {
+            std::memset(dest, 0, size);
+            return;
+        }
+        const VAddr region_end = reinterpret_cast<VAddr>(info.BaseAddress) + info.RegionSize;
+        const u64 chunk = std::min<u64>(size, region_end - virtual_addr);
+        if (Committed(info) && (info.Protect & PAGE_NOACCESS) == 0) {
+            std::memcpy(dest, reinterpret_cast<const void*>(virtual_addr), chunk);
+        } else {
+            std::memset(dest, 0, chunk);
+        }
+        size -= chunk;
+        virtual_addr += chunk;
+        dest += chunk;
+    }
+}
+
+bool MemoryManager::TryWriteBacking(void* address, const void* data, u64 size) {
+    MEMORY_BASIC_INFORMATION info{};
+    auto* cursor = static_cast<u8*>(address);
+    const auto* source = static_cast<const u8*>(data);
+    while (size != 0) {
+        if (!QueryRegion(reinterpret_cast<VAddr>(cursor), info) || !Committed(info)) {
+            return false;
+        }
+        const auto* region_end = static_cast<u8*>(info.BaseAddress) + info.RegionSize;
+        const u64 chunk = std::min<u64>(size, static_cast<u64>(region_end - cursor));
+        const bool writable = (info.Protect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_WRITECOPY)) != 0;
+        DWORD previous = 0;
+        if (!writable && !VirtualProtect(cursor, chunk, PAGE_READWRITE, &previous)) {
+            return false;
+        }
+        std::memcpy(cursor, source, chunk);
+        if (!writable) {
+            VirtualProtect(cursor, chunk, previous, &previous);
+        }
+        size -= chunk;
+        cursor += chunk;
+        source += chunk;
+    }
+    return true;
 }
 
 } // namespace Core
@@ -85,11 +202,19 @@ u64 HeadlessCompletedFlips() {
 namespace {
 
 using PresentFunction = void (*)(s32, s64);
+using GetBufferFunction = s32 (*)(s32, const void**, Libraries::VideoOut::BufferAttribute*);
+using PresentPixelsFunction = void (*)(s32, s64, const void*, u32, u32, u32, s32);
+
+template <typename T>
+T VideoOutExportAs(const char* name) {
+    const HMODULE module = GetModuleHandleW(L"libSceVideoOut.prx");
+    return module != nullptr ? reinterpret_cast<T>(GetProcAddress(module, name)) : nullptr;
+}
 
 PresentFunction VideoOutExport(const char* name) {
-    const HMODULE module = GetModuleHandleW(L"libSceVideoOut.prx");
-    return module != nullptr ? reinterpret_cast<PresentFunction>(GetProcAddress(module, name)) : nullptr;
+    return VideoOutExportAs<PresentFunction>(name);
 }
+
 
 PresentFunction PresentExport() {
     static const PresentFunction function = VideoOutExport("OrbisVideoOutPresent");
@@ -99,6 +224,22 @@ PresentFunction PresentExport() {
 PresentFunction FlipRequestedExport() {
     static const PresentFunction function = VideoOutExport("OrbisVideoOutFlipRequested");
     return function;
+}
+
+void PresentThroughRenderer(s32 buffer, s64 flip_arg) {
+    static const auto get_buffer = VideoOutExportAs<GetBufferFunction>("OrbisVideoOutGetBuffer");
+    static const auto present_pixels = VideoOutExportAs<PresentPixelsFunction>("OrbisVideoOutPresentPixels");
+    if (AnyPs4::RendererReady() && get_buffer != nullptr && present_pixels != nullptr) {
+        const void* address = nullptr;
+        Libraries::VideoOut::BufferAttribute attribute{};
+        AnyPs4::ReadbackFrame frame{};
+        if (get_buffer(buffer, &address, &attribute) == 0 && address != nullptr &&
+            AnyPs4::ReadbackFlip(attribute, reinterpret_cast<VAddr>(address), frame)) {
+            present_pixels(buffer, flip_arg, frame.pixels, frame.width, frame.height, frame.stride, frame.swap_red_blue ? 1 : 0);
+            return;
+        }
+    }
+    if (const auto present = PresentExport()) present(buffer, flip_arg);
 }
 
 } // namespace
@@ -120,7 +261,7 @@ s32 sceVideoOutSubmitEopFlip(s32 handle, u32 buf_id, u32 mode, s64 flip_arg, voi
     if (buf_id >= flip_labels.size()) return 0x80290002;
     if (const auto requested = FlipRequestedExport()) requested(static_cast<s32>(buf_id), flip_arg);
     Platform::IrqC::Instance()->RegisterOnce(Platform::InterruptId::GfxFlip, [buf_id, flip_arg](Platform::InterruptId) {
-        if (const auto present = PresentExport()) present(static_cast<s32>(buf_id), flip_arg);
+        PresentThroughRenderer(static_cast<s32>(buf_id), flip_arg);
         const s32 previous = previous_flip_index.exchange(static_cast<s32>(buf_id), std::memory_order_acq_rel);
         if (previous >= 0) flip_labels[static_cast<size_t>(previous)].store(0, std::memory_order_release);
         completed_flips.fetch_add(1, std::memory_order_acq_rel);

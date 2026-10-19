@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <cstring>
+#include <boost/preprocessor/repetition/repeat.hpp>
 #include <boost/preprocessor/stringize.hpp>
 
 #include "common/assert.h"
@@ -18,6 +19,12 @@
 #include "video_core/amdgpu/pm4_cmds.h"
 #include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
+
+#ifdef ANYPS4_HEADLESS
+namespace AnyPs4 {
+void EnsureRenderer(AmdGpu::Liverpool* liverpool);
+}
+#endif
 
 namespace AmdGpu {
 
@@ -1312,6 +1319,9 @@ Liverpool::CmdBuffer Liverpool::CopyCmdBuffers(std::span<const u32> dcb, std::sp
 }
 
 void Liverpool::SubmitGfx(std::span<const u32> dcb, std::span<const u32> ccb) {
+#ifdef ANYPS4_HEADLESS
+    AnyPs4::EnsureRenderer(this);
+#endif
     auto& queue = mapped_queues[GfxQueueId];
 
     if (EmulatorSettings.IsCopyGpuBuffers()) {
@@ -1330,6 +1340,9 @@ void Liverpool::SubmitGfx(std::span<const u32> dcb, std::span<const u32> ccb) {
 }
 
 void Liverpool::SubmitAsc(u32 gnm_vqid, std::span<const u32> acb) {
+#ifdef ANYPS4_HEADLESS
+    AnyPs4::EnsureRenderer(this);
+#endif
     ASSERT_MSG(gnm_vqid > 0 && gnm_vqid < NumTotalQueues, "Invalid virtual ASC queue index");
     auto& queue = mapped_queues[gnm_vqid];
 

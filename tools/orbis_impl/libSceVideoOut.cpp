@@ -244,7 +244,7 @@ void Convert(const Buffer& buffer, const BufferAttribute& attribute) {
     state.stagingValid = true;
     if (attribute.tilingMode == 0 && !state.warnedTiled) {
         state.warnedTiled = true;
-        Log("display buffers are tiled; presenting them as linear until the detiler lands (phase 3.3)");
+        Log("display buffers are tiled; without the renderer they are shown as linear memory");
     }
 }
 
@@ -277,7 +277,36 @@ void Pace() {
     state.lastPresent = std::chrono::steady_clock::now();
 }
 
-void Present(s32 bufferIndex, s64 flipArg) {
+struct PixelSource {
+    const void* pixels;
+    u32 width;
+    u32 height;
+    u32 stride;
+    bool swapRedBlue;
+};
+
+void CopyPixels(const PixelSource& source) {
+    auto& state = Global();
+    if (source.pixels == nullptr || source.width == 0 || source.height == 0) return;
+    if (state.staging.size() != static_cast<std::size_t>(source.width) * source.height) state.staging.assign(static_cast<std::size_t>(source.width) * source.height, 0);
+    state.stagingWidth = source.width;
+    state.stagingHeight = source.height;
+    for (u32 y = 0; y < source.height; ++y) {
+        const auto* row = reinterpret_cast<const u32*>(static_cast<const u8*>(source.pixels) + static_cast<std::size_t>(y) * source.stride);
+        u32* out = state.staging.data() + static_cast<std::size_t>(y) * source.width;
+        if (!source.swapRedBlue) {
+            std::memcpy(out, row, static_cast<std::size_t>(source.width) * 4);
+        } else {
+            for (u32 x = 0; x < source.width; ++x) {
+                const u32 pixel = row[x];
+                out[x] = (pixel & 0xFF00FF00u) | ((pixel & 0xFFu) << 16) | ((pixel >> 16) & 0xFFu);
+            }
+        }
+    }
+    state.stagingValid = true;
+}
+
+void Present(s32 bufferIndex, s64 flipArg, const PixelSource* source = nullptr) {
     auto& state = Global();
     std::unique_lock guard(state.lock);
     if (bufferIndex < 0 || static_cast<std::size_t>(bufferIndex) >= kMaxBuffers) return;
@@ -286,7 +315,7 @@ void Present(s32 bufferIndex, s64 flipArg) {
     guard.unlock();
     Pace();
     guard.lock();
-    Convert(buffer, attribute);
+    if (source != nullptr) CopyPixels(*source); else Convert(buffer, attribute);
     ++state.flip.count;
     state.flip.processTime = ProcessTimeMicroseconds();
     state.flip.tsc = __rdtsc();
@@ -329,6 +358,22 @@ extern "C" {
 
 __declspec(dllexport) void OrbisVideoOutPresent(s32 bufferIndex, s64 flipArg) {
     Present(bufferIndex, flipArg);
+}
+
+__declspec(dllexport) void OrbisVideoOutPresentPixels(s32 bufferIndex, s64 flipArg, const void* pixels, u32 width, u32 height, u32 stride, s32 swapRedBlue) {
+    const PixelSource source{pixels, width, height, stride, swapRedBlue != 0};
+    Present(bufferIndex, flipArg, &source);
+}
+
+__declspec(dllexport) s32 OrbisVideoOutGetBuffer(s32 bufferIndex, const void** address, BufferAttribute* attribute) {
+    auto& state = Global();
+    std::lock_guard guard(state.lock);
+    if (bufferIndex < 0 || static_cast<std::size_t>(bufferIndex) >= kMaxBuffers || address == nullptr || attribute == nullptr) return -1;
+    const Buffer& buffer = state.buffers[static_cast<std::size_t>(bufferIndex)];
+    if (buffer.address == nullptr || buffer.group < 0) return -1;
+    *address = buffer.address;
+    *attribute = state.groups[static_cast<std::size_t>(buffer.group)];
+    return 0;
 }
 
 __declspec(dllexport) void OrbisVideoOutFlipRequested(s32, s64) {
