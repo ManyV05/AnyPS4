@@ -169,6 +169,18 @@ Open after this phase: the title screen waits for input, and the keyboard pad ha
 
 **Window.** The title bar update deadlocked the GPU thread against the window thread (`SetWindowText` under the module lock while `WM_PAINT` waited for it); the title is now posted to the window thread with `PostMessage`.
 
+### 4.4.6 Phase 3.6 status (18 October 2026): 3D combat
+
+**Logs.** `texture_cache.cpp` reports `Depth overlap` at debug level and `liverpool.cpp` reports the Gfx `WaitRegMem` watchdog once per thousand forced fences (both listed in `VENDOR.md`); a ten-minute run now produces about 15 000 log lines at info level instead of 100 000 per minute.
+
+**Script.** `scratchpad/pad-script8.txt` plays the opening unattended: Left + Circle on "はじめから", Circle every four seconds through the prologue dialogue, Options at 306 s to close the name-entry screen (Circle types a character there; the legend reads ○ 決定, □ 消去, × 戻る, OPTIONS 終わる), two Circles to confirm the name, then Circle every four seconds. Circle is also the attack button, so the same script fights.
+
+**Combat scene.** After the prologue the title drops the Hundred Knight onto its first 3D map, the swamp of chapter 1 (`scratchpad/capture-combat2-3.png`), and the scripted Circles alert three `Lv01` enemies with health bars and exclamation markers (`capture-combat2-8.png`). Over the twelve-minute run the pipeline cache compiled 87 graphics pipelines (43 vertex and 47 pixel shaders) and 10 compute pipelines with no recompiler failure and no renderer error other than the known watchdog; the texture cache registered the scene's targets, among them a 2048x2048 `D32Sfloat` shadow map, a 3072x3072 `R8G8B8A8Unorm` atlas, a 1920x2210 `R16G16B16A16Sfloat` buffer, `Bc1`/`Bc2`/`Bc3` block-compressed textures and the usual 1920x1080 colour, HDR and depth-stencil targets. The terrain, its ripples and glow, the character mesh and the enemy meshes render; the screen-space effects of the swamp are visible. Music and effects play (BGM peak 0.90, MAIN peak 0.91). No further system call appeared.
+
+**Frame rate.** 120 to 176 fps on the 165 Hz panel during combat, 130 to 145 in the prologue, with dips to 91 fps while the first map's shaders compile; the per-frame watchdog fence remains the main cost. The window was resized by hand to 2064x1296 during the run and the swapchain followed it.
+
+Open: the player's own HUD (health and stamina gauges) was not seen in the captures, which may be a scene state rather than a rendering gap; sRGB handling of the blit is still unverified against shadPS4's output; the pipeline cache is not persisted between runs (`IsPipelineCacheEnabled` is false in the settings shim), so every start recompiles.
+
 ### 4.5 Risks
 
 - Two Vulkan devices in one process (Agc's and Gnm's) is fine in phases 3.1 and 3.2 because no Agc title runs in the same process; it only matters if both drivers must coexist.

@@ -880,9 +880,11 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                                             PM4CmdWaitRegMem::MemSpace::Memory;
                         const u32 current = is_mem ? *wait_reg_mem->Address<const u32*>()
                                                    : regs.reg_array[wait_reg_mem->Reg()];
+                        static u64 forced_fences = 0;
+                        if (forced_fences++ % 1000 == 0)
                         LOG_ERROR(Render_Vulkan,
-                                  "Gfx WaitRegMem timeout: mem_space={} addr/reg={:#x} func={} "
-                                  "ref={:#x} current={:#x} — forcing fence",
+                                  "Gfx WaitRegMem timeout (#{}): mem_space={} addr/reg={:#x} func={} "
+                                  "ref={:#x} current={:#x} — forcing fence", forced_fences,
                                   static_cast<u32>(wait_reg_mem->mem_space.Value()),
                                   is_mem
                                       ? reinterpret_cast<u64>(wait_reg_mem->Address<const u32*>())

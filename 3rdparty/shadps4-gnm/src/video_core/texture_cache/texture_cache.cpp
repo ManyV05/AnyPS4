@@ -194,7 +194,7 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
         requested_info.props.has_stencil == cache_image.info.props.has_stencil;
     const bool bpp_match = requested_info.num_bits == cache_image.info.num_bits;
 
-    LOG_INFO(Render_Vulkan,
+    LOG_DEBUG(Render_Vulkan,
              "Depth overlap: addr={:#x} binding={} req(fmt={}, depth={}, bits={}) cache(fmt={}, "
              "depth={}, bits={})",
              cache_image.info.guest_address, static_cast<u32>(binding),
