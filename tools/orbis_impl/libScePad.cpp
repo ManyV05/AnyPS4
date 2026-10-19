@@ -3,7 +3,11 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <string>
+#include <vector>
 
 namespace {
 
@@ -109,13 +113,59 @@ enum Button : u32 {
 
 bool open = false;
 
+struct ScriptedPress {
+    std::uint64_t startMs;
+    u32 buttons;
+    std::uint64_t durationMs;
+};
+
+std::vector<ScriptedPress> script;
+bool scriptLoaded = false;
+std::chrono::steady_clock::time_point firstRead{};
+u32 lastButtons = 0;
+std::uint64_t readCount = 0;
+
+void LoadScript() {
+    if (scriptLoaded) return;
+    scriptLoaded = true;
+    const char* path = std::getenv("ORBIS_PAD_SCRIPT");
+    if (path == nullptr) return;
+    std::ifstream file(path);
+    std::uint64_t start = 0, duration = 0;
+    std::string buttons;
+    while (file >> start >> buttons >> duration) {
+        script.push_back({start, static_cast<u32>(std::strtoul(buttons.c_str(), nullptr, 0)), duration});
+    }
+    std::fprintf(stderr, "[Pad] scripted input: %zu presses from %s\n", script.size(), path);
+    std::fflush(stderr);
+}
+
+u32 ScriptedButtons(std::uint64_t elapsedMs) {
+    u32 buttons = 0;
+    for (const auto& press : script) {
+        if (elapsedMs >= press.startMs && elapsedMs < press.startMs + press.durationMs) buttons |= press.buttons;
+    }
+    return buttons;
+}
+
 void Trace(const char* function, const char* nid) {
     static std::uint64_t calls = 0;
     OrbisHleTrace("libScePad.prx", function, nid, ++calls, __builtin_return_address(0));
 }
 
+bool GameWindowFocused() {
+    const HWND foreground = GetForegroundWindow();
+    if (foreground == nullptr) return false;
+    DWORD process = 0;
+    GetWindowThreadProcessId(foreground, &process);
+    return process == GetCurrentProcessId();
+}
+
 bool Down(int key) {
-    return (GetAsyncKeyState(key) & 0x8000) != 0;
+    static bool focused = false;
+    static std::uint64_t checks = 0;
+    if (checks++ % 64 == 0) focused = GameWindowFocused();
+    return focused && (GetAsyncKeyState(key) & 0x8000) != 0;
 }
 
 u8 Axis(int negative, int positive) {
@@ -170,6 +220,17 @@ ORBIS_SYSV_ABI s32 orbis_scePadReadState(s32 handle, PadData* data) {
     if (Down('1')) buttons |= kL2;
     if (Down('3')) buttons |= kR2;
     if (Down('T')) buttons |= kTouchPad;
+    LoadScript();
+    const auto now = std::chrono::steady_clock::now();
+    if (readCount++ == 0) firstRead = now;
+    const auto elapsedMs = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(now - firstRead).count());
+    buttons |= ScriptedButtons(elapsedMs);
+    if (buttons != lastButtons) {
+        std::fprintf(stderr, "[Pad] t=%llu ms buttons %#x -> %#x (read #%llu)\n", static_cast<unsigned long long>(elapsedMs), lastButtons, buttons,
+                     static_cast<unsigned long long>(readCount));
+        std::fflush(stderr);
+        lastButtons = buttons;
+    }
     data->buttons = buttons;
     data->leftStick = {Axis('A', 'D'), Axis('W', 'S')};
     data->rightStick = {Axis('J', 'L'), Axis('I', 'K')};

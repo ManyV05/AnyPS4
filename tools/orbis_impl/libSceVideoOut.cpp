@@ -107,7 +107,10 @@ struct State {
     bool stagingValid = false;
     bool warnedTiled = false;
     bool directPresentation = false;
+    std::wstring pendingTitle;
 };
+
+constexpr UINT kTitleMessage = WM_APP + 1;
 
 State& Global() {
     static auto* state = new State();
@@ -160,6 +163,16 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
         return 0;
     case WM_ERASEBKGND:
         return 1;
+    case kTitleMessage: {
+        std::wstring title;
+        {
+            auto& state = Global();
+            std::lock_guard guard(state.lock);
+            title = state.pendingTitle;
+        }
+        SetWindowTextW(window, title.c_str());
+        return 0;
+    }
     case WM_CLOSE:
         Log("window closed by the user; exiting");
         ExitProcess(0);
@@ -264,7 +277,8 @@ void UpdateTitle() {
     wchar_t title[256];
     std::swprintf(title, 256, L"%ls | %ux%u | flips %llu | %.1f fps", TitleBase().c_str(), state.windowWidth, state.windowHeight,
                   static_cast<unsigned long long>(state.flip.count), state.fps);
-    SetWindowTextW(state.window, title);
+    state.pendingTitle = title;
+    PostMessageW(state.window, kTitleMessage, 0, 0);
 }
 
 void Pace() {
