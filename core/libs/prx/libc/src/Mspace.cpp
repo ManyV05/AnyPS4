@@ -19,6 +19,7 @@ constexpr unsigned MspaceOrbisDebugFlags = 0x6;
 constexpr std::uintptr_t Granule = 16;
 constexpr std::uintptr_t MinimumAlignment = 32;
 constexpr std::uintptr_t ArenaHeaderBytes = 64;
+constexpr std::size_t MaxExactFitCandidates = 8;
 
 struct Chunk {
     std::uintptr_t end;
@@ -68,7 +69,13 @@ void* Allocate(Arena* arena, std::size_t size, std::size_t alignment) {
         Error(12);
         return nullptr;
     }
+    const auto guaranteed = needed + alignment - Granule;
+    std::size_t inspected = 0;
     for (auto candidate = arena->free.lower_bound({needed, 0}); candidate != arena->free.end(); ++candidate) {
+        if (candidate->first < guaranteed && ++inspected > MaxExactFitCandidates) {
+            candidate = arena->free.lower_bound({guaranteed, 0});
+            if (candidate == arena->free.end()) break;
+        }
         const auto start = candidate->second;
         const auto chunk = arena->chunks.find(start);
         const auto end = chunk->second.end;

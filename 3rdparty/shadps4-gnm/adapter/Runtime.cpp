@@ -25,6 +25,7 @@ struct ReadbackFrame {
     bool swap_red_blue;
 };
 bool RendererReady();
+bool PresentFlip(const Libraries::VideoOut::BufferAttribute& attribute, VAddr address);
 bool ReadbackFlip(const Libraries::VideoOut::BufferAttribute& attribute, VAddr address, ReadbackFrame& out);
 } // namespace AnyPs4
 
@@ -76,9 +77,21 @@ void AddressSpace::Protect(VAddr virtual_addr, u64 size, MemoryPermission perms)
     } else if (exec) {
         protect = PAGE_EXECUTE;
     }
-    DWORD previous = 0;
-    if (!VirtualProtect(reinterpret_cast<void*>(virtual_addr), size, protect, &previous)) {
-        LOG_ERROR(Core, "VirtualProtect({:#x}, {:#x}, {:#x}) failed: {}", virtual_addr, size, protect, GetLastError());
+    VAddr cursor = virtual_addr;
+    const VAddr end = virtual_addr + size;
+    while (cursor < end) {
+        MEMORY_BASIC_INFORMATION info{};
+        if (VirtualQuery(reinterpret_cast<const void*>(cursor), &info, sizeof info) != sizeof info) {
+            LOG_ERROR(Core, "VirtualQuery({:#x}) failed while protecting {:#x}+{:#x}", cursor, virtual_addr, size);
+            return;
+        }
+        const VAddr region_end = std::min<VAddr>(end, reinterpret_cast<VAddr>(info.BaseAddress) + info.RegionSize);
+        DWORD previous = 0;
+        if (!VirtualProtect(reinterpret_cast<void*>(cursor), region_end - cursor, protect, &previous)) {
+            LOG_ERROR(Core, "VirtualProtect({:#x}, {:#x}, {:#x}) failed: {}", cursor, region_end - cursor, protect, GetLastError());
+            return;
+        }
+        cursor = region_end;
     }
 }
 
@@ -204,6 +217,7 @@ namespace {
 using PresentFunction = void (*)(s32, s64);
 using GetBufferFunction = s32 (*)(s32, const void**, Libraries::VideoOut::BufferAttribute*);
 using PresentPixelsFunction = void (*)(s32, s64, const void*, u32, u32, u32, s32);
+using PresentedFunction = void (*)(s32, s64);
 
 template <typename T>
 T VideoOutExportAs(const char* name) {
@@ -229,14 +243,20 @@ PresentFunction FlipRequestedExport() {
 void PresentThroughRenderer(s32 buffer, s64 flip_arg) {
     static const auto get_buffer = VideoOutExportAs<GetBufferFunction>("OrbisVideoOutGetBuffer");
     static const auto present_pixels = VideoOutExportAs<PresentPixelsFunction>("OrbisVideoOutPresentPixels");
-    if (AnyPs4::RendererReady() && get_buffer != nullptr && present_pixels != nullptr) {
+    static const auto presented = VideoOutExportAs<PresentedFunction>("OrbisVideoOutFlipPresented");
+    if (AnyPs4::RendererReady() && get_buffer != nullptr) {
         const void* address = nullptr;
         Libraries::VideoOut::BufferAttribute attribute{};
-        AnyPs4::ReadbackFrame frame{};
-        if (get_buffer(buffer, &address, &attribute) == 0 && address != nullptr &&
-            AnyPs4::ReadbackFlip(attribute, reinterpret_cast<VAddr>(address), frame)) {
-            present_pixels(buffer, flip_arg, frame.pixels, frame.width, frame.height, frame.stride, frame.swap_red_blue ? 1 : 0);
-            return;
+        if (get_buffer(buffer, &address, &attribute) == 0 && address != nullptr) {
+            if (presented != nullptr && AnyPs4::PresentFlip(attribute, reinterpret_cast<VAddr>(address))) {
+                presented(buffer, flip_arg);
+                return;
+            }
+            AnyPs4::ReadbackFrame frame{};
+            if (present_pixels != nullptr && AnyPs4::ReadbackFlip(attribute, reinterpret_cast<VAddr>(address), frame)) {
+                present_pixels(buffer, flip_arg, frame.pixels, frame.width, frame.height, frame.stride, frame.swap_red_blue ? 1 : 0);
+                return;
+            }
         }
     }
     if (const auto present = PresentExport()) present(buffer, flip_arg);

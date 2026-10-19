@@ -3,8 +3,8 @@
 # from core/libs/orbis/CMakeLists.txt, and the orbis_libc / orbis_libkernel targets.
 # External libraries come from a shadPS4 checkout (ANYPS4_SHADPS4_EXTERNALS); see VENDOR.md.
 
-set(ANYPS4_SHADPS4_EXTERNALS "C:/Users/manyv/OneDrive/Documentos/Shadps4git/shadPS4/externals" CACHE PATH
-        "externals/ directory of a shadPS4 checkout (Boost, Vulkan-Headers, VMA, sirit, glslang, Zydis, xxHash, half, robin-map, xbyak, gcn, json, miniz)")
+set(ANYPS4_SHADPS4_EXTERNALS "${CMAKE_CURRENT_SOURCE_DIR}/externals" CACHE PATH
+        "directory with the vendored shadPS4 externals (Boost, Vulkan-Headers, VMA, sirit, glslang, Zydis, xxHash, half, robin-map, xbyak, gcn, json, miniz)")
 set(EXT ${ANYPS4_SHADPS4_EXTERNALS})
 set(EXTBIN ${CMAKE_BINARY_DIR}/externals)
 

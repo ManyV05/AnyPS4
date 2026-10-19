@@ -1,7 +1,8 @@
-// AnyPS4 shim: no SDL window. The Vulkan instance runs headless; presentation is a
-// readback into libSceVideoOut.prx's Win32 window (adapter/Renderer.cpp).
+// AnyPS4 shim: no SDL. The window belongs to libSceVideoOut.prx; this object carries
+// its HWND for the Vulkan surface, or reports a headless system when there is none.
 #pragma once
 
+#include <windows.h>
 #include "common/types.h"
 
 namespace Frontend {
@@ -23,15 +24,29 @@ struct WindowSystemInfo {
 
 class WindowSDL {
 public:
-    WindowSDL(s32 width_ = 1920, s32 height_ = 1080) : width{width_}, height{height_} {}
-    s32 GetWidth() const { return width; }
-    s32 GetHeight() const { return height; }
-    bool IsOpen() const { return true; }
-    WindowSystemInfo GetWindowInfo() const { return {}; }
+    explicit WindowSDL(HWND window_ = nullptr) : window{window_} {}
+    s32 GetWidth() const { return Client().right; }
+    s32 GetHeight() const { return Client().bottom; }
+    bool IsOpen() const { return window == nullptr || IsWindow(window); }
+    WindowSystemInfo GetWindowInfo() const {
+        WindowSystemInfo info{};
+        if (window != nullptr) {
+            info.render_surface = window;
+            info.type = WindowSystemType::Windows;
+        }
+        return info;
+    }
+    HWND Handle() const { return window; }
 
 private:
-    s32 width;
-    s32 height;
+    RECT Client() const {
+        RECT rect{0, 0, 1920, 1080};
+        if (window != nullptr) GetClientRect(window, &rect);
+        if (rect.right <= 0) rect.right = 1;
+        if (rect.bottom <= 0) rect.bottom = 1;
+        return rect;
+    }
+    HWND window;
 };
 
 } // namespace Frontend

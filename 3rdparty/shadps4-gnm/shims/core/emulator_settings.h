@@ -2,6 +2,7 @@
 #pragma once
 
 #include <cstdlib>
+#include <string>
 #include "common/types.h"
 
 enum GpuReadbacksMode : int {
@@ -32,6 +33,10 @@ struct EmulatorSettingsImpl {
     bool IsPatchShaders() const { return true; }
     bool IsFsrEnabled() const { return false; }
     GpuReadbacksMode GetReadbacksMode() const { return GpuReadbacksMode::Disabled; }
+    std::string GetPresentMode() const {
+        const char* mode = std::getenv("ORBIS_GNM_PRESENT_MODE");
+        return mode != nullptr ? mode : "Fifo";
+    }
     float GetRcasAttenuation() const { return 0.25f; }
     s32 GetGpuId() const { return -1; }
 };

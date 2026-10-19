@@ -106,6 +106,7 @@ struct State {
     u32 stagingHeight = 0;
     bool stagingValid = false;
     bool warnedTiled = false;
+    bool directPresentation = false;
 };
 
 State& Global() {
@@ -134,7 +135,8 @@ void PaintLast(HWND window) {
     RECT client{};
     GetClientRect(window, &client);
     std::lock_guard guard(state.lock);
-    if (state.stagingValid) {
+    if (state.directPresentation) {
+    } else if (state.stagingValid) {
         BITMAPINFO info{};
         info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
         info.bmiHeader.biWidth = static_cast<LONG>(state.stagingWidth);
@@ -315,7 +317,7 @@ void Present(s32 bufferIndex, s64 flipArg, const PixelSource* source = nullptr) 
     guard.unlock();
     Pace();
     guard.lock();
-    if (source != nullptr) CopyPixels(*source); else Convert(buffer, attribute);
+    if (source != nullptr) CopyPixels(*source); else if (!state.directPresentation) Convert(buffer, attribute);
     ++state.flip.count;
     state.flip.processTime = ProcessTimeMicroseconds();
     state.flip.tsc = __rdtsc();
@@ -325,7 +327,7 @@ void Present(s32 bufferIndex, s64 flipArg, const PixelSource* source = nullptr) 
     ++state.vblanks;
     HWND window = state.window;
     UpdateTitle();
-    if (window != nullptr && state.stagingValid) {
+    if (window != nullptr && state.stagingValid && !state.directPresentation) {
         HDC dc = GetDC(window);
         if (dc != nullptr) {
             RECT client{};
@@ -358,6 +360,43 @@ extern "C" {
 
 __declspec(dllexport) void OrbisVideoOutPresent(s32 bufferIndex, s64 flipArg) {
     Present(bufferIndex, flipArg);
+}
+
+__declspec(dllexport) void* OrbisVideoOutWindowHandle() {
+    auto& state = Global();
+    for (int attempt = 0; attempt < 200; ++attempt) {
+        {
+            std::lock_guard guard(state.lock);
+            if (state.window != nullptr) {
+                state.directPresentation = true;
+                Log("the GPU presents directly into the window; GDI presentation is off");
+                return state.window;
+            }
+            if (!state.windowStarted) return nullptr;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return nullptr;
+}
+
+__declspec(dllexport) void OrbisVideoOutFlipPresented(s32 bufferIndex, s64 flipArg) {
+    auto& state = Global();
+    std::lock_guard guard(state.lock);
+    ++state.flip.count;
+    state.flip.processTime = ProcessTimeMicroseconds();
+    state.flip.tsc = __rdtsc();
+    state.flip.flipArg = flipArg;
+    state.flip.currentBuffer = bufferIndex;
+    state.flip.flipPendingNum = std::max(0, state.pending.fetch_sub(1) - 1);
+    ++state.vblanks;
+    state.lastPresent = std::chrono::steady_clock::now();
+    UpdateTitle();
+    if (state.flip.count == 1 || state.flip.count % 600 == 0) {
+        char text[160];
+        std::snprintf(text, sizeof text, "flip #%llu presented by the GPU: buffer %d, arg %lld, %.1f fps",
+                      static_cast<unsigned long long>(state.flip.count), bufferIndex, static_cast<long long>(flipArg), state.fps);
+        Log(text);
+    }
 }
 
 __declspec(dllexport) void OrbisVideoOutPresentPixels(s32 bufferIndex, s64 flipArg, const void* pixels, u32 width, u32 height, u32 stride, s32 swapRedBlue) {
