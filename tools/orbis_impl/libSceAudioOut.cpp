@@ -35,16 +35,25 @@ constexpr s32 kPortTypeBgm = 1;
 constexpr s32 kPortTypePadSpk = 4;
 constexpr std::size_t kMaxPorts = 16;
 constexpr u32 kMixFrequency = 48000;
-constexpr u32 kMixFrames = 480;
-constexpr std::size_t kRingBuffers = 8;
-constexpr u32 kQueueAheadChunks = 4;
-constexpr float kFrontGain = 0.211866662f;
-constexpr float kCenterGain = 0.150266662f;
-constexpr float kLfeGain = 0.066666670f;
-constexpr float kBackNearGain = 0.181066677f;
-constexpr float kBackFarGain = 0.111066669f;
-constexpr float kSideNearGain = 0.194133341f;
-constexpr float kSideFarGain = 0.085866667f;
+constexpr u32 kMixFrames = 960;
+constexpr std::size_t kRingBuffers = 12;
+constexpr u32 kQueueAheadChunks = 8;
+constexpr u32 kStarvedChunks = 1;
+constexpr float kFrontGain = 0.5f;
+constexpr float kCenterGain = 0.70710678f;
+constexpr float kLfeGain = 0.15f;
+constexpr float kBackNearGain = 0.25f;
+constexpr float kBackFarGain = 0.15f;
+constexpr float kSideNearGain = 0.27f;
+constexpr float kSideFarGain = 0.12f;
+
+float EnvGain(const char* name, float fallback) {
+    const char* value = std::getenv(name);
+    return value != nullptr ? static_cast<float>(std::atof(value)) : fallback;
+}
+
+const float kBgmGain = EnvGain("ORBIS_AUDIO_BGM_GAIN", 0.7f);
+const float kMainGain = EnvGain("ORBIS_AUDIO_MAIN_GAIN", 1.0f);
 
 struct OutputParam {
     s32 handle;
@@ -79,8 +88,14 @@ struct Port {
     u64 outputs = 0;
     u64 underruns = 0;
     u64 waits = 0;
+    u64 paced = 0;
+    u64 resyncs = 0;
     float peak = 0.0f;
     std::chrono::steady_clock::time_point lastReport{};
+    std::chrono::steady_clock::time_point nextSlot{};
+    bool slotValid = false;
+    FILE* dump = nullptr;
+    u64 dumpFrames = 0;
 };
 
 struct Mixer {
@@ -94,6 +109,20 @@ struct Mixer {
     u64 blocks = 0;
     u64 clipped = 0;
     float peak = 0.0f;
+    FILE* dump = nullptr;
+    u64 dumpFrames = 0;
+};
+
+struct Dump {
+    const char* directory = std::getenv("ORBIS_AUDIO_DUMP");
+    double startSeconds = std::getenv("ORBIS_AUDIO_DUMP_START") != nullptr ? std::atof(std::getenv("ORBIS_AUDIO_DUMP_START")) : 0.0;
+    double lengthSeconds = std::getenv("ORBIS_AUDIO_DUMP_SECONDS") != nullptr ? std::atof(std::getenv("ORBIS_AUDIO_DUMP_SECONDS")) : 20.0;
+    std::chrono::steady_clock::time_point firstOutput{};
+    bool Active() const {
+        if (directory == nullptr || firstOutput.time_since_epoch().count() == 0) return false;
+        const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - firstOutput).count();
+        return elapsed >= startSeconds;
+    }
 };
 
 struct State {
@@ -101,7 +130,64 @@ struct State {
     std::condition_variable drained;
     std::array<Port, kMaxPorts> ports{};
     Mixer mixer;
+    Dump dump;
 };
+
+FILE* OpenDump(const Dump& dump, const char* name) {
+    char path[512];
+    std::snprintf(path, sizeof path, "%s/%s", dump.directory, name);
+    FILE* file = std::fopen(path, "wb");
+    char text[600];
+    std::snprintf(text, sizeof text, "%s %s", file != nullptr ? "dumping to" : "cannot open", path);
+    std::fprintf(stderr, "[AudioOut] %s\n", text);
+    std::fflush(stderr);
+    return file;
+}
+
+void DumpPortChunk(State& state, Port& port, s32 handle, const void* data) {
+    if (!state.dump.Active()) return;
+    const u64 cap = static_cast<u64>(state.dump.lengthSeconds * port.freq);
+    if (port.dumpFrames >= cap) {
+        if (port.dump != nullptr) {
+            std::fclose(port.dump);
+            port.dump = nullptr;
+        }
+        return;
+    }
+    if (port.dump == nullptr) {
+        char name[96];
+        std::snprintf(name, sizeof name, "port%d-type%d-%uch-%s-%uhz.raw", handle, port.type, port.sourceChannels, port.isFloat ? "f32" : "s16", port.freq);
+        port.dump = OpenDump(state.dump, name);
+        if (port.dump == nullptr) {
+            port.dumpFrames = cap;
+            return;
+        }
+    }
+    std::fwrite(data, port.isFloat ? 4 : 2, static_cast<std::size_t>(port.samples) * port.sourceChannels, port.dump);
+    port.dumpFrames += port.samples;
+}
+
+void DumpMixBlock(State& state, const std::vector<s16>& buffer) {
+    Mixer& mixer = state.mixer;
+    if (!state.dump.Active()) return;
+    const u64 cap = static_cast<u64>(state.dump.lengthSeconds * kMixFrequency);
+    if (mixer.dumpFrames >= cap) {
+        if (mixer.dump != nullptr) {
+            std::fclose(mixer.dump);
+            mixer.dump = nullptr;
+        }
+        return;
+    }
+    if (mixer.dump == nullptr) {
+        mixer.dump = OpenDump(state.dump, "mix-2ch-s16-48000hz.raw");
+        if (mixer.dump == nullptr) {
+            mixer.dumpFrames = cap;
+            return;
+        }
+    }
+    std::fwrite(buffer.data(), sizeof(s16), buffer.size(), mixer.dump);
+    mixer.dumpFrames += kMixFrames;
+}
 
 State& Global() {
     static auto* state = new State();
@@ -141,8 +227,23 @@ bool DescribeFormat(u32 format, u32& channels, bool& isFloat, bool& standardOrde
 
 void MixerThread();
 
+void PreciseSleepUntil(std::chrono::steady_clock::time_point slot) {
+    for (;;) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= slot) return;
+        const auto remaining = std::chrono::duration_cast<std::chrono::microseconds>(slot - now);
+        if (remaining > std::chrono::milliseconds(2)) {
+            Sleep(static_cast<DWORD>(remaining.count() / 1000 - 1));
+        } else {
+            SwitchToThread();
+        }
+    }
+}
+
 bool StartMixer(State& state) {
     Mixer& mixer = state.mixer;
+    static const bool timerResolution = timeBeginPeriod(1) == TIMERR_NOERROR;
+    (void)timerResolution;
     if (mixer.running) return true;
     if (mixer.failed) return false;
     mixer.event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
@@ -219,18 +320,20 @@ void MixBlock(State& state, std::vector<float>& mix) {
     std::fill(mix.begin(), mix.end(), 0.0f);
     for (Port& port : state.ports) {
         if (!port.used || !port.mixed) continue;
-        const float gainLeft = std::clamp(port.volume[0], 0, 32768) / 32768.0f;
-        const float gainRight = std::clamp(port.volume[1], 0, 32768) / 32768.0f;
+        const float typeGain = port.type == kPortTypeBgm ? kBgmGain : kMainGain;
+        const float gainLeft = typeGain * std::clamp(port.volume[0], 0, 32768) / 32768.0f;
+        const float gainRight = typeGain * std::clamp(port.volume[1], 0, 32768) / 32768.0f;
         const double ratio = static_cast<double>(port.freq) / kMixFrequency;
         const std::size_t available = port.queue.size() / 2;
         double position = port.resamplePosition;
         u32 produced = 0;
         for (; produced < kMixFrames; ++produced) {
             const auto index = static_cast<std::size_t>(position);
-            if (index + 1 >= available) break;
+            if (index >= available) break;
+            const std::size_t next = std::min(index + 1, available - 1);
             const float t = static_cast<float>(position - static_cast<double>(index));
-            const float left = port.queue[index * 2] * (1.0f - t) + port.queue[(index + 1) * 2] * t;
-            const float right = port.queue[index * 2 + 1] * (1.0f - t) + port.queue[(index + 1) * 2 + 1] * t;
+            const float left = port.queue[index * 2] * (1.0f - t) + port.queue[next * 2] * t;
+            const float right = port.queue[index * 2 + 1] * (1.0f - t) + port.queue[next * 2 + 1] * t;
             mix[static_cast<std::size_t>(produced) * 2] += left * gainLeft;
             mix[static_cast<std::size_t>(produced) * 2 + 1] += right * gainRight;
             position += ratio;
@@ -272,6 +375,7 @@ void MixerThread() {
             ++mixer.blocks;
             mixer.clipped += clipped;
             mixer.peak = std::max(mixer.peak, peak);
+            DumpMixBlock(state, buffer);
         }
     }
 }
@@ -282,12 +386,13 @@ void Report(State& state, Port& port, s32 handle) {
     port.lastReport = now;
     char text[320];
     std::snprintf(text, sizeof text,
-                  "port %d (type %d): %u Hz, %u ch %s%s -> %s, %llu outputs of %u samples, %llu waits, %llu underruns, queue %zu frames, gain %.2f/%.2f, peak %.3f; mixer %llu blocks, %llu clipped samples, peak %.3f",
+                  "port %d (type %d): %u Hz, %u ch %s%s -> %s, %llu outputs of %u samples, %llu paced, %llu resyncs, %llu waits, %llu underruns, queue %zu frames, gain %.2f/%.2f x%.2f, peak %.3f; mixer %llu blocks, %llu clipped samples, peak %.3f",
                   handle, port.type, port.freq, port.sourceChannels, port.isFloat ? "float" : "s16", port.standardOrder ? " std" : "",
                   port.mixed ? "mixer" : "paced sink", static_cast<unsigned long long>(port.outputs), port.samples,
+                  static_cast<unsigned long long>(port.paced), static_cast<unsigned long long>(port.resyncs),
                   static_cast<unsigned long long>(port.waits), static_cast<unsigned long long>(port.underruns), port.queue.size() / 2,
-                  port.volume[0] / 32768.0f, port.volume[1] / 32768.0f, port.peak, static_cast<unsigned long long>(state.mixer.blocks),
-                  static_cast<unsigned long long>(state.mixer.clipped), state.mixer.peak);
+                  port.volume[0] / 32768.0f, port.volume[1] / 32768.0f, port.type == kPortTypeBgm ? kBgmGain : kMainGain, port.peak,
+                  static_cast<unsigned long long>(state.mixer.blocks), static_cast<unsigned long long>(state.mixer.clipped), state.mixer.peak);
     Log(text);
     port.peak = 0.0f;
     state.mixer.peak = 0.0f;
@@ -298,7 +403,7 @@ void PaceVirtual(Port& port) {
     const auto now = std::chrono::steady_clock::now();
     if (port.virtualClock.time_since_epoch().count() == 0 || port.virtualClock < now - period * 4) port.virtualClock = now;
     port.virtualClock += period;
-    std::this_thread::sleep_until(port.virtualClock);
+    PreciseSleepUntil(port.virtualClock);
 }
 
 s32 Output(s32 handle, const void* data) {
@@ -321,6 +426,22 @@ s32 Output(s32 handle, const void* data) {
         while (!port->queue.empty() && std::chrono::steady_clock::now() < deadline) state.drained.wait_for(guard, std::chrono::milliseconds(20));
         return static_cast<s32>(port->samples);
     }
+    const auto period = std::chrono::microseconds(static_cast<long long>(port->samples) * 1000000LL / std::max(1u, port->freq));
+    const auto now = std::chrono::steady_clock::now();
+    if (!port->slotValid || now > port->nextSlot + period * 4 || port->queue.size() < static_cast<std::size_t>(port->samples) * kStarvedChunks * 2) {
+        if (port->slotValid) ++port->resyncs;
+        port->nextSlot = now;
+        port->slotValid = true;
+    } else if (now < port->nextSlot) {
+        const auto slot = port->nextSlot;
+        guard.unlock();
+        PreciseSleepUntil(slot);
+        guard.lock();
+        port = GetPort(handle);
+        if (port == nullptr) return kErrorInvalidPort;
+        ++port->paced;
+    }
+    port->nextSlot += period;
     const std::size_t limit = static_cast<std::size_t>(port->samples) * kQueueAheadChunks * 2;
     bool waited = false;
     while (port->queue.size() >= limit && std::chrono::steady_clock::now() < deadline) {
@@ -329,6 +450,8 @@ s32 Output(s32 handle, const void* data) {
     }
     if (waited) ++port->waits;
     if (port->queue.size() >= limit) port->queue.erase(port->queue.begin(), port->queue.begin() + static_cast<std::ptrdiff_t>(port->samples * 2));
+    if (state.dump.firstOutput.time_since_epoch().count() == 0) state.dump.firstOutput = std::chrono::steady_clock::now();
+    DumpPortChunk(state, *port, handle, data);
     ConvertChunk(*port, data);
     ++port->outputs;
     Report(state, *port, handle);

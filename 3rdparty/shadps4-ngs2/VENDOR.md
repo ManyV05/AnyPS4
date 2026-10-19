@@ -14,3 +14,5 @@ definitions in the `.cpp` files, since this module keeps no public header) and `
 `tools/orbis_impl/libSceAudioOut.cpp` plays through `waveOut`.
 
 Local change: `ngs2_custom.h` closed two struct definitions with a variable of the same name (`} OrbisNgs2CustomChorusModuleOption;`, `} OrbisNgs2CustomVoicePeakMeterParam;`), which defines a global in every translation unit that includes the header; both now end with `};`.
+
+Local change (phase 3.8): `sceNgs2SystemRender` reuses a voice's cached grain only when the voice is more than 64 ms ahead of the wall clock (the fork's window was 8 ms). `libSceAudioOut.prx` paces the title per chunk, so renders never run that far ahead and every render produces a fresh grain; with the 8 ms window, outputs released in bursts by the mixer repeated one chunk in four and the music crackled. The music volume floor the fork applies when the title asks for near silence is 0.4 instead of 0.6 (`ORBIS_NGS2_MUSIC_FLOOR` overrides it) so dialogue stays above the soundtrack.

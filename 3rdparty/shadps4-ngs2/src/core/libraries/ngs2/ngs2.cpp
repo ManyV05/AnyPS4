@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <cmath>
 #include <cstring>
 #include <deque>
@@ -1161,7 +1162,10 @@ s32 PS4_SYSV_ABI sceNgs2SystemRender(OrbisNgs2Handle systemHandle,
             }
             // Pace grain production by wall-clock time so the voice advances at
             // 48kHz no matter how many output buffers are rendered per cycle;
-            // extra renders in the same cycle reuse the cached grain.
+            // extra renders in the same cycle reuse the cached grain. AnyPS4:
+            // sceAudioOutOutput paces the title per chunk, so a render may run
+            // up to 64 ms ahead of the clock before a grain is reused; the old
+            // 8 ms window repeated one chunk in four when outputs came in bursts.
             const auto now = std::chrono::steady_clock::now();
             if (!voice.clock_valid) {
                 voice.clock_valid = true;
@@ -1178,7 +1182,7 @@ s32 PS4_SYSV_ABI sceNgs2SystemRender(OrbisNgs2Handle systemHandle,
                               std::chrono::duration<double>(double(voice.clock_samples) /
                                                             48000.0));
             }
-            if (ahead < 0.008 || voice.grain_len != num_samples) {
+            if (ahead < 0.064 || voice.grain_len != num_samples) {
                 // Gain: port volume; for music also the matrix peak (the game's
                 // fade engine ramps music in/out through matrix levels — without
                 // it, crossfade successor tracks play at their initial silence).
@@ -1189,8 +1193,12 @@ s32 PS4_SYSV_ABI sceNgs2SystemRender(OrbisNgs2Handle systemHandle,
                     // it started (root cause of its decision still unidentified).
                     // Floor the music volume so the soundtrack stays audible; real
                     // track changes still swap via voice retirement.
+                    static const float music_floor = [] {
+                        const char* value = std::getenv("ORBIS_NGS2_MUSIC_FLOOR");
+                        return value != nullptr ? static_cast<float>(std::atof(value)) : 0.4f;
+                    }();
                     if (gain < 0.25f) {
-                        gain = 0.6f;
+                        gain = music_floor;
                     }
                 }
                 ProduceGrain(voice, num_samples, std::clamp(gain, 0.0f, 4.0f));
