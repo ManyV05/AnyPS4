@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstring>
 #include <boost/preprocessor/stringize.hpp>
 
 #include "common/assert.h"
@@ -19,6 +20,32 @@
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 
 namespace AmdGpu {
+
+#ifdef ANYPS4_HEADLESS
+// AnyPS4: without a rasterizer the CP still has to perform the CPU-visible DMA
+// transfers (memory fills and memory-to-memory copies) the title waits for.
+static void HeadlessDmaData(const PM4DmaData* dma_data) {
+    if (dma_data->dst_addr_lo == 0x3022C) {
+        return;
+    }
+    const bool src_memory = dma_data->src_sel == DmaDataSrc::Memory ||
+                            dma_data->src_sel == DmaDataSrc::MemoryUsingL2;
+    const bool dst_memory = dma_data->dst_sel == DmaDataDst::Memory ||
+                            dma_data->dst_sel == DmaDataDst::MemoryUsingL2;
+    const u32 num_bytes = dma_data->NumBytes();
+    if (!dst_memory || num_bytes == 0) {
+        return;
+    }
+    if (dma_data->src_sel == DmaDataSrc::Data) {
+        auto* dst = dma_data->DstAddress<u32*>();
+        for (u32 i = 0; i < num_bytes / sizeof(u32); ++i) {
+            dst[i] = dma_data->data;
+        }
+    } else if (src_memory) {
+        std::memmove(dma_data->DstAddress<void*>(), dma_data->SrcAddress<const void*>(), num_bytes);
+    }
+}
+#endif
 
 static const char* dcb_task_name{"DCB_TASK"};
 static const char* ccb_task_name{"CCB_TASK"};
@@ -727,6 +754,12 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             }
             case PM4ItOpcode::DmaData: {
                 const auto* dma_data = reinterpret_cast<const PM4DmaData*>(header);
+#ifdef ANYPS4_HEADLESS
+                if (!rasterizer) {
+                    HeadlessDmaData(dma_data);
+                    break;
+                }
+#endif
                 if (dma_data->dst_addr_lo == 0x3022C || !rasterizer) {
                     break;
                 }
@@ -1023,6 +1056,12 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
         }
         case PM4ItOpcode::DmaData: {
             const auto* dma_data = reinterpret_cast<const PM4DmaData*>(header);
+#ifdef ANYPS4_HEADLESS
+            if (!rasterizer) {
+                HeadlessDmaData(dma_data);
+                break;
+            }
+#endif
             if (dma_data->dst_addr_lo == 0x3022C || !rasterizer) {
                 break;
             }

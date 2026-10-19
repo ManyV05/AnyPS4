@@ -217,6 +217,7 @@ class VendoredLibrary:
     PS4_FUNCTION = re.compile("PS4_SYSV_ABI[ ]+([A-Za-z_][A-Za-z0-9_]*)[ ]*[(]")
 
     DECLARATION = re.compile(r"([A-Za-z_][\w:<>\*&\s]*?)\s+PS4_SYSV_ABI\s+([A-Za-z_]\w*)\s*\(([^;{]*?)\)\s*;")
+    DEFINITION = re.compile(r"^([A-Za-z_][\w:<>\*&\s]*?)\s+PS4_SYSV_ABI\s+([A-Za-z_]\w*)\s*\(([^;{]*?)\)\s*(?:try\s*)?\{", re.MULTILINE)
     NAMESPACE = re.compile(r"namespace\s+([\w:]+)\s*\{")
 
     def __init__(self, repo_root: Path, directory: str, module: str) -> None:
@@ -225,10 +226,16 @@ class VendoredLibrary:
         self.provided: dict[str, str] = {}
         self.declarations: dict[str, tuple[str, str, str, str]] = {}
         source_root = repo_root / directory / "src"
+        self.definitions: dict[str, tuple[str, str, str, tuple[str, ...]]] = {}
         for source in sorted(source_root.rglob("*.cpp")):
             text = source.read_text(encoding="utf-8", errors="replace")
             for name in self.PS4_FUNCTION.findall(text):
                 self.provided.setdefault(compute_nid(name), name)
+            siblings = tuple(f"<{name}>" if bracket == "<" else f'"{name}"' for bracket, name in re.findall(r'^#include\s+([<"])([^>"]+)[>"]', text, re.MULTILINE))
+            for match in self.DEFINITION.finditer(text):
+                namespaces = [m.group(1) for m in self.NAMESPACE.finditer(text[:match.start()])]
+                namespace = namespaces[-1] if namespaces else ""
+                self.definitions.setdefault(match.group(2), (" ".join(match.group(1).split()), " ".join(match.group(3).split()), namespace, siblings))
         for header in sorted(source_root.rglob("*.h")):
             text = header.read_text(encoding="utf-8", errors="replace")
             relative = header.relative_to(source_root).as_posix()
@@ -237,11 +244,18 @@ class VendoredLibrary:
                 namespace = namespaces[-1] if namespaces else ""
                 self.declarations.setdefault(match.group(2), (" ".join(match.group(1).split()), " ".join(match.group(3).split()), namespace, relative))
 
-    def forwarder(self, name: str, nid: str = "") -> tuple[str, str, str] | None:
+    def forwarder(self, name: str, nid: str = "") -> tuple[str, str, tuple[str, ...]] | None:
         declaration = self.declarations.get(name)
+        forward = False
         if declaration is None:
-            return None
-        result, params, namespace, header = declaration
+            definition = self.definitions.get(name)
+            if definition is None:
+                return None
+            result, params, namespace, headers = definition
+            forward = True
+        else:
+            result, params, namespace, header = declaration
+            headers = (f'"{header}"',)
         arguments: list[str] = []
         declared: list[str] = []
         type_words = {"void", "char", "short", "int", "long", "float", "double", "bool", "unsigned", "signed", "size_t", "uintptr_t", "intptr_t",
@@ -264,10 +278,18 @@ class VendoredLibrary:
         params = ", ".join(declared)
         qualified = (namespace + "::" if namespace else "") + name
         symbol = name + "_nid_postfix"
-        text = (f'extern "C" {result} PS4_SYSV_ABI {symbol}({params}) {{ static std::uint64_t calls = 0; '
-                f'OrbisHleTrace("{self.module}", "{name}", "{nid}", ++calls, __builtin_return_address(0)); '
-                f'return {qualified}({", ".join(arguments)}); }}')
-        return symbol, text, header
+        text = ""
+        if forward:
+            text = (f"namespace {namespace} {{ {result} PS4_SYSV_ABI {name}({params}); }}" if namespace
+                    else f"{result} PS4_SYSV_ABI {name}({params});")
+        text += FORWARDER_SPLIT
+        text += (f'extern "C" {result} PS4_SYSV_ABI {symbol}({params}) {{ static std::uint64_t calls = 0; '
+                 f'OrbisHleTrace("{self.module}", "{name}", "{nid}", ++calls, __builtin_return_address(0)); '
+                 f'return {qualified}({", ".join(arguments)}); }}')
+        return symbol, text, headers
+
+
+FORWARDER_SPLIT = "\n//FORWARDER//\n"
 
 
 def sanitize(name: str) -> str | None:
@@ -399,15 +421,20 @@ def write_complement(out: Path, file_name: str, missing: dict[str, dict], forwar
     directory.mkdir(parents=True, exist_ok=True)
     lines = ["#include <common/OrbisHle.hpp>", "#include <cmath>", "#include <cstdio>", "#include <cstdlib>"]
     forwarders = forwarders or []
-    for header in sorted({header for _, _, header in forwarders}):
-        lines.append(f'#include "{header}"')
+    seen: list[str] = []
+    for _, _, headers in forwarders:
+        for header in headers:
+            if header not in seen:
+                seen.append(header)
+    lines += [f"#include {header}" for header in seen]
     if forwarders:
         lines.append("")
+    lines += [text.split(FORWARDER_SPLIT)[0] for _, text, _ in forwarders if text.split(FORWARDER_SPLIT)[0]]
     for namespace in sorted({text.split("return ")[1].rsplit("::", 1)[0] for _, text, _ in forwarders if "::" in text.split("return ")[1]}):
         lines.append(f"using namespace {namespace};")
     lines += ["", 'extern "C" {', ""]
     for _, text, _ in forwarders:
-        lines.append(text)
+        lines.append(text.split(FORWARDER_SPLIT)[-1])
     if forwarders:
         lines.append("")
     explicit: list[str] = []
@@ -437,14 +464,17 @@ def write_complement(out: Path, file_name: str, missing: dict[str, dict], forwar
 
 STUB_IMPLEMENTATIONS: dict[str, tuple[str, str, str]] = {
     "sceUserServiceGetInitialUser": ("std::int32_t", "std::int32_t* userId", "if (userId != nullptr) *userId = 1; return 0;"),
+    "sceUserServiceGetEvent": ("std::int32_t", "std::uint32_t* event",
+                               "static bool delivered = false; if (event == nullptr) return static_cast<std::int32_t>(0x80960002); if (delivered) return static_cast<std::int32_t>(0x80960007); delivered = true; event[0] = 0; event[1] = 1; return 0;"),
     "sceUserServiceGetLoginUserIdList": ("std::int32_t", "std::int32_t* list", "if (list != nullptr) { list[0] = 1; list[1] = -1; list[2] = -1; list[3] = -1; } return 0;"),
     "sceUserServiceGetUserName": ("std::int32_t", "std::int32_t, char* name, std::size_t size",
                                   "if (name != nullptr && size != 0) { const char* text = \"Player\"; std::size_t index = 0; while (text[index] != 0 && index + 1 < size) { name[index] = text[index]; ++index; } name[index] = 0; } return 0;"),
-    "scePadOpen": ("std::int32_t", "std::int32_t, std::int32_t, std::int32_t, const void*", "return 1;"),
-    "sceVideoOutOpen": ("std::int32_t", "std::int32_t, std::int32_t, std::int32_t, const void*", "return 1;"),
-    "sceVideoOutGetResolutionStatus": ("std::int32_t", "std::int32_t, std::uint32_t* status",
-                                       "if (status != nullptr) { status[0] = 1920; status[1] = 1080; status[2] = 0; status[3] = 1920; status[4] = 1080; status[5] = 0x40000000; } return 0;"),
     "scePlayGoOpen": ("std::int32_t", "std::int32_t* handle, const void*", "if (handle != nullptr) *handle = 1; return 0;"),
+    "scePlayGoGetLocus": ("std::int32_t", "std::int32_t, const std::uint16_t*, std::uint32_t count, std::int8_t* loci",
+                          "if (loci == nullptr) return static_cast<std::int32_t>(0x80B20002); for (std::uint32_t k = 0; k < count; ++k) loci[k] = 3; return 0;"),
+    "scePlayGoGetProgress": ("std::int32_t", "std::int32_t, const std::uint16_t*, std::uint32_t, std::uint64_t* progress",
+                             "if (progress != nullptr) { progress[0] = 1; progress[1] = 1; } return 0;"),
+    "scePlayGoGetToDoList": ("std::int32_t", "std::int32_t, void*, std::uint32_t, std::uint32_t* entries", "if (entries != nullptr) *entries = 0; return 0;"),
 }
 
 
@@ -461,6 +491,45 @@ STUB_EXTERNAL: dict[str, str] = {
     "sceNgs2RackGetVoiceHandle": "orbis_sceNgs2RackGetVoiceHandle",
     "sceNgs2VoiceGetState": "orbis_sceNgs2VoiceGetState",
     "sceNgs2VoiceGetStateFlags": "orbis_sceNgs2VoiceGetStateFlags",
+    "sceVideoOutOpen": "orbis_sceVideoOutOpen",
+    "sceVideoOutClose": "orbis_sceVideoOutClose",
+    "sceVideoOutSetBufferAttribute": "orbis_sceVideoOutSetBufferAttribute",
+    "sceVideoOutRegisterBuffers": "orbis_sceVideoOutRegisterBuffers",
+    "sceVideoOutRegisterStereoBuffers": "orbis_sceVideoOutRegisterStereoBuffers",
+    "sceVideoOutUnregisterBuffers": "orbis_sceVideoOutUnregisterBuffers",
+    "sceVideoOutSetFlipRate": "orbis_sceVideoOutSetFlipRate",
+    "sceVideoOutGetFlipStatus": "orbis_sceVideoOutGetFlipStatus",
+    "sceVideoOutIsFlipPending": "orbis_sceVideoOutIsFlipPending",
+    "sceVideoOutSubmitFlip": "orbis_sceVideoOutSubmitFlip",
+    "sceVideoOutAddFlipEvent": "orbis_sceVideoOutAddFlipEvent",
+    "sceVideoOutGetResolutionStatus": "orbis_sceVideoOutGetResolutionStatus",
+    "sceVideoOutGetDeviceCapabilityInfo": "orbis_sceVideoOutGetDeviceCapabilityInfo",
+    "sceVideoOutConfigureOutputMode_": "orbis_sceVideoOutConfigureOutputMode_",
+    "sceVideoOutModeSetAny_": "orbis_sceVideoOutModeSetAny_",
+    "sceVideoOutGetVblankStatus": "orbis_sceVideoOutGetVblankStatus",
+    "sceAudioOutInit": "orbis_sceAudioOutInit",
+    "sceAudioOutOpen": "orbis_sceAudioOutOpen",
+    "sceAudioOutClose": "orbis_sceAudioOutClose",
+    "sceAudioOutOutput": "orbis_sceAudioOutOutput",
+    "sceAudioOutOutputs": "orbis_sceAudioOutOutputs",
+    "sceAudioOutSetVolume": "orbis_sceAudioOutSetVolume",
+    "sceAudioOutGetPortState": "orbis_sceAudioOutGetPortState",
+    "sceAudioOutSetMixLevelPadSpk": "orbis_sceAudioOutSetMixLevelPadSpk",
+    "scePadInit": "orbis_scePadInit",
+    "scePadOpen": "orbis_scePadOpen",
+    "scePadClose": "orbis_scePadClose",
+    "scePadReadState": "orbis_scePadReadState",
+    "scePadGetControllerInformation": "orbis_scePadGetControllerInformation",
+    "scePadSetLightBar": "orbis_scePadSetLightBar",
+    "scePadSetMotionSensorState": "orbis_scePadSetMotionSensorState",
+    "scePadSetVibration": "orbis_scePadSetVibration",
+    "scePadResetOrientation": "orbis_scePadResetOrientation",
+}
+
+EXTERNAL_LINK_LIBRARIES: dict[str, list[str]] = {
+    "libSceVideoOut": ["user32", "gdi32"],
+    "libSceAudioOut": ["winmm"],
+    "libScePad": ["user32"],
 }
 
 IMPLEMENTATION_DIR = Path(__file__).resolve().parent / "orbis_impl"
@@ -477,7 +546,6 @@ STUB_RETURNS: dict[str, str] = {
     "sceNpTrophyAbortHandle": "0x80551601",
     "sceNpTrophyGetTrophyInfo": "0x80551601",
     "sceNpTrophyGetGroupInfo": "0x80551601",
-    "sceUserServiceGetEvent": "0x80960007",
     "sceSystemServiceReceiveEvent": "0x80A10004",
 }
 
@@ -643,7 +711,9 @@ def write_cmake(out: Path, files: list[str], real: dict[str, ProsperoLibrary], v
                 "        ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/implib)",
                 "if(MINGW)",
                 f"    target_link_options(orbis_{stem} PRIVATE -static -static-libgcc -static-libstdc++)",
+                f"    target_compile_options(orbis_{stem} PRIVATE -fno-exceptions)",
                 "endif()",
+            ] + ([f"target_link_libraries(orbis_{stem} PRIVATE {' '.join(EXTERNAL_LINK_LIBRARIES[stem])})"] if stem in EXTERNAL_LINK_LIBRARIES else []) + [
                 f"list(APPEND ORBIS_PRX_OUTPUTS orbis_{stem})",
                 "",
             ]
@@ -695,6 +765,9 @@ def write_cmake(out: Path, files: list[str], real: dict[str, ProsperoLibrary], v
             f"target_include_directories(orbis_{stem}_complement PRIVATE ${{CMAKE_CURRENT_SOURCE_DIR}} ${{CMAKE_SOURCE_DIR}}/{library.directory}/shims ${{CMAKE_SOURCE_DIR}}/{library.directory}/src ${{CMAKE_SOURCE_DIR}}/{library.directory}/externals/fmt/include ${{CMAKE_SOURCE_DIR}}/{library.directory}/externals/magic_enum/include ${{ORBIS_PROSPERO_LIBS}})",
             f"target_compile_definitions(orbis_{stem}_complement PRIVATE FMT_HEADER_ONLY=1 ANYPS4_HEADLESS=1 NOMINMAX WIN32_LEAN_AND_MEAN)",
             f"target_compile_features(orbis_{stem}_complement PRIVATE cxx_std_23)",
+            f"if(EXISTS ${{CMAKE_SOURCE_DIR}}/{library.directory}/complement.cmake)",
+            f"    include(${{CMAKE_SOURCE_DIR}}/{library.directory}/complement.cmake)",
+            "endif()",
             f"set_target_properties(orbis_{stem}_complement PROPERTIES POSITION_INDEPENDENT_CODE ON)",
             f"set(ORBIS_{upper}_COMPLEMENT $<TARGET_OBJECTS:orbis_{stem}_complement>)",
             f"add_subdirectory(${{CMAKE_SOURCE_DIR}}/{library.directory} ${{CMAKE_BINARY_DIR}}/vendored/{stem})",

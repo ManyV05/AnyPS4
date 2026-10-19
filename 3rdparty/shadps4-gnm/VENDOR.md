@@ -10,3 +10,5 @@ Vendored from the local shadPS4 checkout `C:\Users\manyv\OneDrive\Documentos\Sha
 Local changes to vendored files:
 
 - `core/libraries/gnmdriver/gnmdriver.cpp`: `RegisterLib` does not create the Vulkan presenter under `ANYPS4_HEADLESS` and binds the headless VideoOut port.
+
+Local change (phase 3.2): `liverpool.cpp` performs memory fills and memory-to-memory `DMA_DATA` transfers on the CPU when there is no rasterizer (`HeadlessDmaData`, under `ANYPS4_HEADLESS`), since titles wait for those copies.

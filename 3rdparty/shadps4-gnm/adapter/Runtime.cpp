@@ -82,6 +82,27 @@ u64 HeadlessCompletedFlips() {
     return completed_flips.load(std::memory_order_acquire);
 }
 
+namespace {
+
+using PresentFunction = void (*)(s32, s64);
+
+PresentFunction VideoOutExport(const char* name) {
+    const HMODULE module = GetModuleHandleW(L"libSceVideoOut.prx");
+    return module != nullptr ? reinterpret_cast<PresentFunction>(GetProcAddress(module, name)) : nullptr;
+}
+
+PresentFunction PresentExport() {
+    static const PresentFunction function = VideoOutExport("OrbisVideoOutPresent");
+    return function;
+}
+
+PresentFunction FlipRequestedExport() {
+    static const PresentFunction function = VideoOutExport("OrbisVideoOutFlipRequested");
+    return function;
+}
+
+} // namespace
+
 VideoOutPort* HeadlessVideoOutPort() {
     return &headless_port;
 }
@@ -97,7 +118,9 @@ s32 sceVideoOutSubmitEopFlip(s32 handle, u32 buf_id, u32 mode, s64 flip_arg, voi
     OrbisHleTrace("libSceVideoOut.prx", "sceVideoOutSubmitEopFlip", "headless", ++calls, __builtin_return_address(0));
     LOG_DEBUG(Lib_GnmDriver, "headless flip request: handle={} buffer={} mode={} arg={}", handle, buf_id, mode, flip_arg);
     if (buf_id >= flip_labels.size()) return 0x80290002;
-    Platform::IrqC::Instance()->RegisterOnce(Platform::InterruptId::GfxFlip, [buf_id](Platform::InterruptId) {
+    if (const auto requested = FlipRequestedExport()) requested(static_cast<s32>(buf_id), flip_arg);
+    Platform::IrqC::Instance()->RegisterOnce(Platform::InterruptId::GfxFlip, [buf_id, flip_arg](Platform::InterruptId) {
+        if (const auto present = PresentExport()) present(static_cast<s32>(buf_id), flip_arg);
         const s32 previous = previous_flip_index.exchange(static_cast<s32>(buf_id), std::memory_order_acq_rel);
         if (previous >= 0) flip_labels[static_cast<size_t>(previous)].store(0, std::memory_order_release);
         completed_flips.fetch_add(1, std::memory_order_acq_rel);
