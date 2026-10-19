@@ -12,6 +12,9 @@
 #include <mutex>
 #include <vector>
 #include "common/logging/log.h"
+#include "common/path_util.h"
+#include <cstdio>
+#include <cstdlib>
 #include "core/emulator_settings.h"
 #include "core/libraries/videoout/buffer.h"
 #include "sdl_window.h"
@@ -19,7 +22,10 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
+#include "video_core/renderer_vulkan/host_passes/pp_pass.h"
+#include "video_core/renderer_vulkan/vk_presenter.h"
 #include "video_core/renderer_vulkan/vk_swapchain.h"
+#include "video_core/texture_cache/image_view.h"
 #include "video_core/texture_cache/image.h"
 #include "video_core/texture_cache/texture_cache.h"
 
@@ -32,6 +38,8 @@ struct ReadbackFrame {
     u32 stride;
     bool swap_red_blue;
 };
+
+bool ReadbackFlip(const Libraries::VideoOut::BufferAttribute& attribute, VAddr address, ReadbackFrame& out);
 
 namespace {
 
@@ -53,6 +61,7 @@ struct Renderer {
           scheduler{instance}, rasterizer{std::make_unique<Vulkan::Rasterizer>(instance, scheduler, liverpool)} {
         if (hwnd != nullptr) {
             swapchain = std::make_unique<Vulkan::Swapchain>(instance, window);
+            pp_pass.Create(instance.GetDevice(), swapchain->GetSurfaceFormat().format);
         }
     }
 
@@ -98,6 +107,7 @@ struct Renderer {
     Vulkan::Scheduler scheduler;
     std::unique_ptr<Vulkan::Rasterizer> rasterizer;
     std::unique_ptr<Vulkan::Swapchain> swapchain;
+    Vulkan::HostPasses::PostProcessingPass pp_pass;
     VkBuffer download_buffer{VK_NULL_HANDLE};
     VmaAllocation download_allocation{};
     void* download_mapped{};
@@ -110,6 +120,21 @@ struct Renderer {
 std::unique_ptr<Renderer> renderer;
 std::once_flag renderer_once;
 bool renderer_failed = false;
+
+vk::Format FrameViewFormat(const Libraries::VideoOut::PixelFormat format, const vk::Format image_format) {
+    switch (format) {
+    case Libraries::VideoOut::PixelFormat::A8B8G8R8Srgb:
+        return vk::Format::eR8G8B8A8Srgb;
+    case Libraries::VideoOut::PixelFormat::A8R8G8B8Srgb:
+        return vk::Format::eB8G8R8A8Srgb;
+    case Libraries::VideoOut::PixelFormat::A2R10G10B10:
+    case Libraries::VideoOut::PixelFormat::A2R10G10B10Srgb:
+    case Libraries::VideoOut::PixelFormat::A2R10G10B10Bt2020Pq:
+        return vk::Format::eA2R10G10B10UnormPack32;
+    default:
+        return image_format;
+    }
+}
 
 VideoCore::Image& FindVideoOutImage(Renderer& r, const Libraries::VideoOut::BufferAttribute& attribute, VAddr address) {
     const Libraries::VideoOut::BufferAttributeGroup group{true, attribute};
@@ -177,37 +202,40 @@ bool PresentFlip(const Libraries::VideoOut::BufferAttribute& attribute, VAddr ad
                 return false;
             }
         }
+        VideoCore::ImageViewInfo view_info{};
+        view_info.format = FrameViewFormat(attribute.pixel_format, image.info.pixel_format);
+        view_info.mapping.a = vk::ComponentSwizzle::eOne;
+        auto& view = image.FindView(view_info);
         r.scheduler.EndRendering();
         const auto cmdbuf = r.scheduler.CommandBuffer();
-        image.Transit(vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead, {}, cmdbuf);
+        image.Transit(vk::ImageLayout::eShaderReadOnlyOptimal, vk::AccessFlagBits2::eShaderRead, {}, cmdbuf);
         const vk::Image target = swapchain.Image();
         const vk::ImageSubresourceRange range{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
-        const vk::ImageMemoryBarrier2 to_transfer{
+        const vk::ImageMemoryBarrier2 to_attachment{
             .srcStageMask = vk::PipelineStageFlagBits2::eTopOfPipe,
             .srcAccessMask = vk::AccessFlagBits2::eNone,
-            .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
-            .dstAccessMask = vk::AccessFlagBits2::eTransferWrite,
+            .dstStageMask = vk::PipelineStageFlagBits2::eColorAttachmentOutput,
+            .dstAccessMask = vk::AccessFlagBits2::eColorAttachmentWrite,
             .oldLayout = vk::ImageLayout::eUndefined,
-            .newLayout = vk::ImageLayout::eTransferDstOptimal,
+            .newLayout = vk::ImageLayout::eColorAttachmentOptimal,
             .image = target,
             .subresourceRange = range,
         };
-        cmdbuf.pipelineBarrier2(vk::DependencyInfo{.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &to_transfer});
+        cmdbuf.pipelineBarrier2(vk::DependencyInfo{.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &to_attachment});
         const vk::Extent2D extent = swapchain.GetExtent();
-        const vk::ImageBlit blit{
-            .srcSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
-            .srcOffsets = {{vk::Offset3D{0, 0, 0}, vk::Offset3D{static_cast<s32>(width), static_cast<s32>(height), 1}}},
-            .dstSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
-            .dstOffsets = {{vk::Offset3D{0, 0, 0}, vk::Offset3D{static_cast<s32>(extent.width), static_cast<s32>(extent.height), 1}}},
+        Vulkan::Frame frame{
+            .width = extent.width,
+            .height = extent.height,
+            .image = target,
+            .image_view = swapchain.ImageView(),
         };
-        cmdbuf.blitImage(image.GetImage(), vk::ImageLayout::eTransferSrcOptimal, target, vk::ImageLayout::eTransferDstOptimal, blit,
-                         vk::Filter::eLinear);
+        r.pp_pass.Render(cmdbuf, *view.image_view, vk::Extent2D{width, height}, frame, Vulkan::HostPasses::PostProcessingPass::Settings{});
         const vk::ImageMemoryBarrier2 to_present{
-            .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
-            .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+            .srcStageMask = vk::PipelineStageFlagBits2::eColorAttachmentOutput | vk::PipelineStageFlagBits2::eFragmentShader,
+            .srcAccessMask = vk::AccessFlagBits2::eColorAttachmentWrite,
             .dstStageMask = vk::PipelineStageFlagBits2::eBottomOfPipe,
             .dstAccessMask = vk::AccessFlagBits2::eNone,
-            .oldLayout = vk::ImageLayout::eTransferDstOptimal,
+            .oldLayout = vk::ImageLayout::eGeneral,
             .newLayout = vk::ImageLayout::ePresentSrcKHR,
             .image = target,
             .subresourceRange = range,
@@ -224,8 +252,28 @@ bool PresentFlip(const Libraries::VideoOut::BufferAttribute& attribute, VAddr ad
             }
         }
         if (++r.flips == 1 || r.flips % 600 == 0) {
-            LOG_INFO(Render_Vulkan, "flip #{} presented: {}x{} {} from image {:#x} into the {}x{} swapchain", r.flips, width, height,
-                     vk::to_string(image.info.pixel_format), address, extent.width, extent.height);
+            LOG_INFO(Render_Vulkan, "flip #{} presented: {}x{} {} viewed as {} from image {:#x} into the {}x{} {} swapchain", r.flips, width,
+                     height, vk::to_string(image.info.pixel_format), vk::to_string(view_info.format), address, extent.width, extent.height,
+                     vk::to_string(swapchain.GetSurfaceFormat().format));
+        }
+        static const u64 dump_flip = [] { const char* v = std::getenv("ORBIS_GNM_DUMP_FRAME"); return v != nullptr ? std::strtoull(v, nullptr, 10) : 0; }();
+        if (dump_flip != 0 && r.flips == dump_flip) {
+            ReadbackFrame frame{};
+            if (ReadbackFlip(attribute, address, frame)) {
+                const auto path = Common::FS::GetUserPath(Common::FS::PathType::ScreenshotsDir) / fmt::format("frame-{}.ppm", r.flips);
+                if (FILE* file = std::fopen(path.string().c_str(), "wb")) {
+                    std::fprintf(file, "P6\n%u %u\n255\n", frame.width, frame.height);
+                    const auto* px = static_cast<const u8*>(frame.pixels);
+                    for (u64 i = 0; i < static_cast<u64>(frame.width) * frame.height; ++i) {
+                        const u8 r0 = frame.swap_red_blue ? px[i * 4 + 0] : px[i * 4 + 2];
+                        const u8 b0 = frame.swap_red_blue ? px[i * 4 + 2] : px[i * 4 + 0];
+                        const u8 rgb[3] = {r0, px[i * 4 + 1], b0};
+                        std::fwrite(rgb, 1, 3, file);
+                    }
+                    std::fclose(file);
+                    LOG_INFO(Render_Vulkan, "flip #{} dumped to {}", r.flips, path.string());
+                }
+            }
         }
         return true;
     } catch (const std::exception& error) {
@@ -268,8 +316,7 @@ bool ReadbackFlip(const Libraries::VideoOut::BufferAttribute& attribute, VAddr a
         out.width = width;
         out.height = height;
         out.stride = width * 4;
-        out.swap_red_blue = format == vk::Format::eR8G8B8A8Srgb || format == vk::Format::eR8G8B8A8Unorm ||
-                            format == vk::Format::eA8B8G8R8SrgbPack32 || format == vk::Format::eA8B8G8R8UnormPack32;
+        out.swap_red_blue = attribute.pixel_format == Libraries::VideoOut::PixelFormat::A8B8G8R8Srgb;
         if (++r.readbacks == 1 || r.readbacks % 600 == 0) {
             LOG_INFO(Render_Vulkan, "flip #{} read back: {}x{} {} from image {:#x}", r.readbacks, width, height, vk::to_string(format), address);
         }

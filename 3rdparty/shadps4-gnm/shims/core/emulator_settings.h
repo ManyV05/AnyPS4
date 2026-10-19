@@ -16,7 +16,7 @@ struct EmulatorSettingsImpl {
     bool IsVkHostMarkersEnabled() const { return false; }
     bool IsVkGuestMarkersEnabled() const { return false; }
     bool IsPipelineCacheArchived() const { return false; }
-    bool IsPipelineCacheEnabled() const { return false; }
+    bool IsPipelineCacheEnabled() const { return std::getenv("ORBIS_GNM_NO_PIPELINE_CACHE") == nullptr; }
     bool IsDumpShaders() const { return std::getenv("ORBIS_GNM_DUMP_SHADERS") != nullptr; }
     bool IsShaderCollect() const { return false; }
     bool IsRenderdocEnabled() const { return false; }
