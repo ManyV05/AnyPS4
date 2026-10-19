@@ -1,0 +1,37 @@
+#pragma once
+
+#include <array>
+#include <string>
+
+namespace launcher {
+
+struct Settings {
+    std::wstring gameDirectory;
+    std::wstring installDirectory;
+    std::wstring executable;
+    std::wstring repoRoot;
+    std::wstring buildDirectory;
+    std::wstring shadps4Checkout;
+    std::wstring toolchainBin;
+    std::wstring relinker;
+    std::wstring python = L"python";
+    std::wstring cmake = L"cmake";
+    std::wstring presentMode = L"Fifo";
+    bool validation = false;
+    bool pipelineCache = true;
+    bool headless = false;
+    bool writeWatch = false;
+    int bgmVolume = 70;
+    int mainVolume = 100;
+    int musicFloor = 40;
+    bool xinput = true;
+    std::array<int, 24> keys{};
+};
+
+std::wstring SettingsPath();
+Settings LoadSettings();
+void SaveSettings(const Settings& settings);
+void SavePadConfiguration(const Settings& settings);
+std::wstring PadConfigurationPath(const Settings& settings);
+
+}  // namespace launcher

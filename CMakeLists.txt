@@ -91,6 +91,10 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/core/libs/orbis/CMakeLists.txt)
     add_subdirectory(core/libs/orbis)
 endif()
 
+if(WIN32 AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tools/launcher/CMakeLists.txt)
+    add_subdirectory(tools/launcher)
+endif()
+
 if(ANYPS5_RELINKER_ONLY)
     add_subdirectory(core/relinker)
     return()

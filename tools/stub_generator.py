@@ -480,7 +480,6 @@ STUB_IMPLEMENTATIONS: dict[str, tuple[str, str, str]] = {
                                "if (details != nullptr) { const std::size_t size = *reinterpret_cast<const std::size_t*>(details); if (size != 0 && size <= 4096) { std::memset(details + 8, 0, size - 8); } } if (data != nullptr) { const std::size_t size = *reinterpret_cast<const std::size_t*>(data); if (size != 0 && size <= 4096) { std::memset(data + 8, 0, size - 8); } } return 0;"),
     "sceNpTrophyGetTrophyUnlockState": ("std::int32_t", "std::int32_t, std::int32_t, std::uint8_t* flags, std::uint32_t* count", "if (flags != nullptr) std::memset(flags, 0, 16); if (count != nullptr) *count = 0; return 0;"),
     "sceNpTrophyUnlockTrophy": ("std::int32_t", "std::int32_t, std::int32_t, std::int32_t, std::int32_t* platinumId", "if (platinumId != nullptr) *platinumId = -1; return 0;"),
-    "sceSaveDataDirNameSearch": ("std::int32_t", "const void*, std::uint32_t* result", "if (result != nullptr) { result[0] = 0; result[5] = 0; } return 0;"),
     "sceSystemServiceParamGetInt": ("std::int32_t", "std::int32_t paramId, std::int32_t* value", "if (value == nullptr) return static_cast<std::int32_t>(0x80A10003); switch (paramId) { case 1: *value = 1; break; case 2: *value = 2; break; case 3: *value = 0; break; case 4: *value = -360; break; case 5: *value = 0; break; case 6: *value = 0; break; case 7: *value = 0; break; case 1000: *value = 1; break; default: *value = 0; break; } return 0;"),
     "sceAppContentAppParamGetInt": ("std::int32_t", "std::uint32_t paramId, std::int32_t* value", "if (value == nullptr) return static_cast<std::int32_t>(0x80D90002); *value = paramId == 0 ? 3 : 0; return 0;"),
     "sceAppContentGetAddcontInfoList": ("std::int32_t", "std::uint32_t, void*, std::uint32_t, std::uint32_t* hitNum", "if (hitNum != nullptr) *hitNum = 0; return 0;"),
@@ -529,6 +528,14 @@ STUB_EXTERNAL: dict[str, str] = {
     "sceAudioOutSetVolume": "orbis_sceAudioOutSetVolume",
     "sceAudioOutGetPortState": "orbis_sceAudioOutGetPortState",
     "sceAudioOutSetMixLevelPadSpk": "orbis_sceAudioOutSetMixLevelPadSpk",
+    "sceSaveDataInitialize": "orbis_sceSaveDataInitialize",
+    "sceSaveDataTerminate": "orbis_sceSaveDataTerminate",
+    "sceSaveDataMount": "orbis_sceSaveDataMount",
+    "sceSaveDataUmount": "orbis_sceSaveDataUmount",
+    "sceSaveDataSetParam": "orbis_sceSaveDataSetParam",
+    "sceSaveDataSaveIcon": "orbis_sceSaveDataSaveIcon",
+    "sceSaveDataDirNameSearch": "orbis_sceSaveDataDirNameSearch",
+    "sceSaveDataDelete": "orbis_sceSaveDataDelete",
     "sceSaveDataDialogInitialize": "orbis_sceSaveDataDialogInitialize",
     "sceSaveDataDialogTerminate": "orbis_sceSaveDataDialogTerminate",
     "sceSaveDataDialogOpen": "orbis_sceSaveDataDialogOpen",
@@ -552,7 +559,7 @@ STUB_EXTERNAL: dict[str, str] = {
 EXTERNAL_LINK_LIBRARIES: dict[str, list[str]] = {
     "libSceVideoOut": ["user32", "gdi32"],
     "libSceAudioOut": ["winmm"],
-    "libScePad": ["user32"],
+    "libScePad": ["user32", "xinput9_1_0"],
 }
 
 IMPLEMENTATION_DIR = Path(__file__).resolve().parent / "orbis_impl"

@@ -1,5 +1,8 @@
 #include <common/OrbisHle.hpp>
 #include <windows.h>
+#include <xinput.h>
+#include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -8,6 +11,8 @@
 #include <fstream>
 #include <string>
 #include <vector>
+
+#include "PadKeyNames.hpp"
 
 namespace {
 
@@ -95,6 +100,8 @@ struct ControllerInformation {
 };
 
 enum Button : u32 {
+    kL3 = 0x2,
+    kR3 = 0x4,
     kOptions = 0x8,
     kUp = 0x10,
     kRight = 0x20,
@@ -112,6 +119,92 @@ enum Button : u32 {
 };
 
 bool open = false;
+
+struct Mapping {
+    std::array<int, 24> keys{};
+    bool xinput = true;
+    bool loaded = false;
+};
+
+Mapping mapping;
+bool xinputConnected = false;
+std::chrono::steady_clock::time_point xinputChecked{};
+
+std::string ExecutableDirectory() {
+    char buffer[MAX_PATH];
+    const DWORD length = GetModuleFileNameA(nullptr, buffer, MAX_PATH);
+    std::string path(buffer, length);
+    const std::size_t slash = path.find_last_of("\\/");
+    return slash == std::string::npos ? std::string(".") : path.substr(0, slash);
+}
+
+void LoadMapping() {
+    if (mapping.loaded) return;
+    mapping.loaded = true;
+    std::size_t count = 0;
+    const anyps4::PadBinding* bindings = anyps4::PadBindings(count);
+    for (std::size_t k = 0; k < count && k < mapping.keys.size(); ++k) mapping.keys[k] = bindings[k].defaultKey;
+    const char* configured = std::getenv("ORBIS_PAD_CONFIG");
+    const std::string path = configured != nullptr ? std::string(configured) : ExecutableDirectory() + "\\anyps4\\pad.ini";
+    if (GetFileAttributesA(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        std::fprintf(stderr, "[Pad] no %s: default keyboard mapping, XInput on\n", path.c_str());
+        std::fflush(stderr);
+        return;
+    }
+    char value[64];
+    for (std::size_t k = 0; k < count && k < mapping.keys.size(); ++k) {
+        GetPrivateProfileStringA("pad", bindings[k].setting, "", value, sizeof value, path.c_str());
+        if (value[0] != '\0') mapping.keys[k] = anyps4::PadKeyFromName(value);
+    }
+    mapping.xinput = GetPrivateProfileIntA("pad", "xinput", 1, path.c_str()) != 0;
+    std::string summary;
+    for (std::size_t k = 0; k < count && k < mapping.keys.size(); ++k) summary += std::string(k == 0 ? "" : ", ") + bindings[k].setting + "=" + anyps4::PadKeyName_(mapping.keys[k]);
+    std::fprintf(stderr, "[Pad] mapping from %s: %s; XInput %s\n", path.c_str(), summary.c_str(), mapping.xinput ? "on" : "off");
+    std::fflush(stderr);
+}
+
+bool ReadXInput(PadData* data, u32& buttons) {
+    if (!mapping.xinput) return false;
+    const auto now = std::chrono::steady_clock::now();
+    if (!xinputConnected && now - xinputChecked < std::chrono::seconds(2)) return false;
+    XINPUT_STATE state{};
+    const DWORD result = XInputGetState(0, &state);
+    xinputChecked = now;
+    const bool connected = result == ERROR_SUCCESS;
+    if (connected != xinputConnected) {
+        std::fprintf(stderr, "[Pad] XInput gamepad %s\n", connected ? "connected" : "disconnected");
+        std::fflush(stderr);
+        xinputConnected = connected;
+    }
+    if (!connected) return false;
+    const WORD w = state.Gamepad.wButtons;
+    if (w & XINPUT_GAMEPAD_A) buttons |= kCross;
+    if (w & XINPUT_GAMEPAD_B) buttons |= kCircle;
+    if (w & XINPUT_GAMEPAD_X) buttons |= kSquare;
+    if (w & XINPUT_GAMEPAD_Y) buttons |= kTriangle;
+    if (w & XINPUT_GAMEPAD_DPAD_UP) buttons |= kUp;
+    if (w & XINPUT_GAMEPAD_DPAD_DOWN) buttons |= kDown;
+    if (w & XINPUT_GAMEPAD_DPAD_LEFT) buttons |= kLeft;
+    if (w & XINPUT_GAMEPAD_DPAD_RIGHT) buttons |= kRight;
+    if (w & XINPUT_GAMEPAD_LEFT_SHOULDER) buttons |= kL1;
+    if (w & XINPUT_GAMEPAD_RIGHT_SHOULDER) buttons |= kR1;
+    if (w & XINPUT_GAMEPAD_LEFT_THUMB) buttons |= kL3;
+    if (w & XINPUT_GAMEPAD_RIGHT_THUMB) buttons |= kR3;
+    if (w & XINPUT_GAMEPAD_START) buttons |= kOptions;
+    if (w & XINPUT_GAMEPAD_BACK) buttons |= kTouchPad;
+    if (state.Gamepad.bLeftTrigger > 30) buttons |= kL2;
+    if (state.Gamepad.bRightTrigger > 30) buttons |= kR2;
+    auto axis = [](SHORT value) {
+        if (value > -7849 && value < 7849) return static_cast<u8>(128);
+        const int scaled = (static_cast<int>(value) + 32768) * 255 / 65535;
+        return static_cast<u8>(std::clamp(scaled, 0, 255));
+    };
+    data->leftStick = {axis(state.Gamepad.sThumbLX), static_cast<u8>(255 - axis(state.Gamepad.sThumbLY))};
+    data->rightStick = {axis(state.Gamepad.sThumbRX), static_cast<u8>(255 - axis(state.Gamepad.sThumbRY))};
+    data->analogButtons.l2 = state.Gamepad.bLeftTrigger;
+    data->analogButtons.r2 = state.Gamepad.bRightTrigger;
+    return true;
+}
 
 struct ScriptedPress {
     std::uint64_t startMs;
@@ -174,6 +267,10 @@ u8 Axis(int negative, int positive) {
     return 128;
 }
 
+int Key(std::size_t binding) {
+    return mapping.keys[binding];
+}
+
 }  // namespace
 
 extern "C" {
@@ -186,9 +283,9 @@ ORBIS_SYSV_ABI s32 orbis_scePadInit() {
 ORBIS_SYSV_ABI s32 orbis_scePadOpen(s32 userId, s32 type, s32 index, const void*) {
     Trace("scePadOpen", "xk0AcarP3V4");
     if (type != 0 && type != 1) return kErrorInvalidArg;
-    std::fprintf(stderr, "[Pad] scePadOpen(user %d, type %d, index %d) -> handle %d; keyboard: arrows=D-pad, Z=Cross, X=Circle, C=Square, V=Triangle, Enter=Options, Q/E=L1/R1, 1/3=L2/R2, WASD/IJKL=sticks\n",
-                 userId, type, index, kHandle);
+    std::fprintf(stderr, "[Pad] scePadOpen(user %d, type %d, index %d) -> handle %d\n", userId, type, index, kHandle);
     std::fflush(stderr);
+    LoadMapping();
     open = true;
     return kHandle;
 }
@@ -205,21 +302,29 @@ ORBIS_SYSV_ABI s32 orbis_scePadReadState(s32 handle, PadData* data) {
     if (handle != kHandle) return kErrorInvalidHandle;
     if (data == nullptr) return kErrorInvalidArg;
     std::memset(data, 0, sizeof *data);
+    LoadMapping();
     u32 buttons = 0;
-    if (Down(VK_RETURN)) buttons |= kOptions;
-    if (Down(VK_UP)) buttons |= kUp;
-    if (Down(VK_RIGHT)) buttons |= kRight;
-    if (Down(VK_DOWN)) buttons |= kDown;
-    if (Down(VK_LEFT)) buttons |= kLeft;
-    if (Down('Z') || Down(VK_SPACE)) buttons |= kCross;
-    if (Down('X')) buttons |= kCircle;
-    if (Down('C')) buttons |= kSquare;
-    if (Down('V')) buttons |= kTriangle;
-    if (Down('Q')) buttons |= kL1;
-    if (Down('E')) buttons |= kR1;
-    if (Down('1')) buttons |= kL2;
-    if (Down('3')) buttons |= kR2;
-    if (Down('T')) buttons |= kTouchPad;
+    if (Down(Key(0))) buttons |= kCross;
+    if (Down(Key(1))) buttons |= kCircle;
+    if (Down(Key(2))) buttons |= kSquare;
+    if (Down(Key(3))) buttons |= kTriangle;
+    if (Down(Key(4))) buttons |= kUp;
+    if (Down(Key(5))) buttons |= kDown;
+    if (Down(Key(6))) buttons |= kLeft;
+    if (Down(Key(7))) buttons |= kRight;
+    if (Down(Key(8))) buttons |= kL1;
+    if (Down(Key(9))) buttons |= kR1;
+    if (Down(Key(10))) buttons |= kL2;
+    if (Down(Key(11))) buttons |= kR2;
+    if (Down(Key(12))) buttons |= kL3;
+    if (Down(Key(13))) buttons |= kR3;
+    if (Down(Key(14))) buttons |= kOptions;
+    if (Down(Key(15))) buttons |= kTouchPad;
+    data->leftStick = {Axis(Key(18), Key(19)), Axis(Key(16), Key(17))};
+    data->rightStick = {Axis(Key(22), Key(23)), Axis(Key(20), Key(21))};
+    data->analogButtons.l2 = Down(Key(10)) ? 255 : 0;
+    data->analogButtons.r2 = Down(Key(11)) ? 255 : 0;
+    ReadXInput(data, buttons);
     LoadScript();
     const auto now = std::chrono::steady_clock::now();
     if (readCount++ == 0) firstRead = now;
@@ -232,10 +337,6 @@ ORBIS_SYSV_ABI s32 orbis_scePadReadState(s32 handle, PadData* data) {
         lastButtons = buttons;
     }
     data->buttons = buttons;
-    data->leftStick = {Axis('A', 'D'), Axis('W', 'S')};
-    data->rightStick = {Axis('J', 'L'), Axis('I', 'K')};
-    data->analogButtons.l2 = Down('1') ? 255 : 0;
-    data->analogButtons.r2 = Down('3') ? 255 : 0;
     data->orientation = {0.0f, 0.0f, 0.0f, 1.0f};
     data->acceleration = {0.0f, 1.0f, 0.0f};
     data->connected = true;
