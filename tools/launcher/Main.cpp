@@ -35,6 +35,7 @@ constexpr int kIdBgmLabel = 115;
 constexpr int kIdMainLabel = 116;
 constexpr int kIdFloorLabel = 117;
 constexpr int kIdLog = 118;
+constexpr int kIdDiagnostics = 119;
 constexpr int kIdKeyBase = 200;
 constexpr UINT kMessageLogLine = WM_APP + 1;
 constexpr UINT kMessageInstallDone = WM_APP + 2;
@@ -114,6 +115,7 @@ void ReadControlsIntoSettings() {
     g_settings.validation = SendMessageW(Control(kIdValidation), BM_GETCHECK, 0, 0) == BST_CHECKED;
     g_settings.pipelineCache = SendMessageW(Control(kIdPipelineCache), BM_GETCHECK, 0, 0) == BST_CHECKED;
     g_settings.headless = SendMessageW(Control(kIdHeadless), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    g_settings.diagnostics = SendMessageW(Control(kIdDiagnostics), BM_GETCHECK, 0, 0) == BST_CHECKED;
     g_settings.presentMode = WindowText(Control(kIdPresent));
     g_settings.bgmVolume = static_cast<int>(SendMessageW(Control(kIdBgm), TBM_GETPOS, 0, 0));
     g_settings.mainVolume = static_cast<int>(SendMessageW(Control(kIdMain), TBM_GETPOS, 0, 0));
@@ -160,10 +162,21 @@ void Play() {
     swprintf(number, 32, L"%.2f", g_settings.musicFloor / 100.0);
     environment.emplace_back(L"ORBIS_NGS2_MUSIC_FLOOR", number);
     environment.emplace_back(L"ORBIS_PAD_CONFIG", launcher::PadConfigurationPath(g_settings));
+    environment.emplace_back(L"ORBIS_NGS2_TRACE", g_settings.diagnostics ? L"1" : L"");
+    environment.emplace_back(L"ORBIS_GNM_DUMP_EVERY", g_settings.diagnostics ? L"3000" : L"");
+    environment.emplace_back(L"ORBIS_GNM_LOG", g_settings.diagnostics ? L"info" : L"");
+    std::error_code logError;
+    const std::filesystem::path logDirectory = std::filesystem::path(g_settings.installDirectory) / L"anyps4" / L"log";
+    std::filesystem::create_directories(logDirectory, logError);
+    SYSTEMTIME now{};
+    GetLocalTime(&now);
+    wchar_t stamp[32];
+    swprintf(stamp, 32, L"%04u%02u%02u-%02u%02u%02u", now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond);
+    const std::wstring logFile = (logDirectory / (std::wstring(L"session-") + stamp + L".log")).wstring();
     std::wstring error;
-    if (launcher::StartDetached(executable, g_settings.installDirectory, environment, error)) {
+    if (launcher::StartDetached(executable, g_settings.installDirectory, environment, logFile, error)) {
         AppendLog(L"Started " + executable + L" (present " + g_settings.presentMode + L", BGM " + std::to_wstring(g_settings.bgmVolume) + L" %, voices " +
-                  std::to_wstring(g_settings.mainVolume) + L" %)");
+                  std::to_wstring(g_settings.mainVolume) + L" %" + (g_settings.diagnostics ? L", diagnostics on" : L"") + L"); log " + logFile);
     } else {
         AppendLog(L"Could not start the title: " + error);
     }
@@ -179,6 +192,16 @@ void Install() {
     if (!std::filesystem::exists(std::filesystem::path(g_settings.gameDirectory) / L"eboot.bin")) {
         AppendLog(L"No eboot.bin in " + g_settings.gameDirectory);
         return;
+    }
+    {
+        std::error_code error;
+        const auto game = std::filesystem::weakly_canonical(g_settings.gameDirectory, error);
+        const auto install = std::filesystem::weakly_canonical(g_settings.installDirectory, error);
+        const auto rel = install.lexically_relative(game);
+        if (install == game || (!rel.empty() && rel.native().rfind(L"..", 0) != 0)) {
+            AppendLog(L"The install folder must be outside the game folder: app0 becomes a junction to the game, and the game files are never copied.");
+            return;
+        }
     }
     launcher::SaveSettings(g_settings);
     g_installing = true;
@@ -234,6 +257,8 @@ void CreateControls() {
     SendMessageW(Control(kIdValidation), BM_SETCHECK, g_settings.validation ? BST_CHECKED : BST_UNCHECKED, 0);
     Create(L"BUTTON", L"Headless (no rendering)", BS_AUTOCHECKBOX, 567, 222, 220, 24, kIdHeadless);
     SendMessageW(Control(kIdHeadless), BM_SETCHECK, g_settings.headless ? BST_CHECKED : BST_UNCHECKED, 0);
+    Create(L"BUTTON", L"Diagnostics (trace, frame dumps)", BS_AUTOCHECKBOX, 567, 420, 220, 24, kIdDiagnostics);
+    SendMessageW(Control(kIdDiagnostics), BM_SETCHECK, g_settings.diagnostics ? BST_CHECKED : BST_UNCHECKED, 0);
     const int sliders[3][3] = {{kIdBgm, kIdBgmLabel, g_settings.bgmVolume}, {kIdMain, kIdMainLabel, g_settings.mainVolume}, {kIdFloor, kIdFloorLabel, g_settings.musicFloor}};
     for (int k = 0; k < 3; ++k) {
         const int y = 258 + k * 58;
@@ -302,6 +327,7 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
         case kIdValidation:
         case kIdPipelineCache:
         case kIdHeadless:
+        case kIdDiagnostics:
         case kIdPresent:
             ReadControlsIntoSettings();
             launcher::SaveSettings(g_settings);

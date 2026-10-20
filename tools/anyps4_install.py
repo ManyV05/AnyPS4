@@ -12,6 +12,7 @@ The game files are never copied: app0 is a directory junction to the folder the 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import subprocess
@@ -65,6 +66,7 @@ def main() -> int:
     parser.add_argument("--cmake", default=os.environ.get("ANYPS4_CMAKE", "cmake"))
     parser.add_argument("--ninja", default=os.environ.get("ANYPS4_NINJA", ""), help="ninja executable (for a fresh configure)")
     parser.add_argument("--skip-build", action="store_true", help="only relink and generate; reuse the libraries already in <out>/libs")
+    parser.add_argument("--pool", default=None, help="directory of <name>.json records for every installed title (default %APPDATA%/AnyPS4/registries); the libraries are generated for the union of them")
     args = parser.parse_args()
 
     game = args.game.resolve()
@@ -74,6 +76,9 @@ def main() -> int:
         log(f"error: {eboot} not found")
         return 2
     name = args.name or game.name
+    if out == game or game in out.parents or out in game.parents:
+        log(f"error: the install folder ({out}) must be separate from the game folder ({game}); app0 becomes a junction to the game")
+        return 2
     out.mkdir(parents=True, exist_ok=True)
     if args.toolchain_bin:
         os.environ["PATH"] = args.toolchain_bin + os.pathsep + os.environ["PATH"]
@@ -93,7 +98,23 @@ def main() -> int:
         return 4
 
     log("== 2/4 generating the runtime libraries' sources")
-    command = [sys.executable, str(REPO / "tools" / "stub_generator.py"), "--registry", str(registry), "--eboot", str(eboot)]
+    pool = Path(args.pool) if args.pool else Path(os.environ.get("APPDATA", str(REPO))) / "AnyPS4" / "registries"
+    pool.mkdir(parents=True, exist_ok=True)
+    (pool / (name + ".json")).write_text(json.dumps({"registry": str(registry), "eboot": str(eboot)}, indent=1), encoding="utf-8")
+    titles = []
+    for entry in sorted(pool.glob("*.json")):
+        try:
+            info = json.loads(entry.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if Path(info.get("registry", "")).is_file() and Path(info.get("eboot", "")).is_file():
+            titles.append((info["registry"], info["eboot"]))
+        else:
+            log(f"  skipping {entry.name}: its registry or eboot is gone")
+    log(f"  union of {len(titles)} installed title(s) from {pool}")
+    command = [sys.executable, str(REPO / "tools" / "stub_generator.py")]
+    for title_registry, title_eboot in titles:
+        command += ["--registry", title_registry, "--eboot", title_eboot]
     if args.shadps4 and str(args.shadps4) != ".":
         command += ["--shadps4", str(args.shadps4)]
     for spec in VENDORED:

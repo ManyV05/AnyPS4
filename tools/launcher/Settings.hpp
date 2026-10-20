@@ -21,6 +21,7 @@ struct Settings {
     bool pipelineCache = true;
     bool headless = false;
     bool writeWatch = false;
+    bool diagnostics = false;
     int bgmVolume = 70;
     int mainVolume = 100;
     int musicFloor = 40;

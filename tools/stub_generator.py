@@ -307,37 +307,45 @@ def load_registry(path: Path) -> list[dict]:
     return entries
 
 
-def collect(registry: list[dict], eboot: Eboot | None) -> tuple[list[str], dict[str, dict[str, dict]], list[str]]:
-    requested: dict[str, str | None] = {}
-    for entry in registry:
-        symbol = entry.get("nid") or entry.get("Nid") or ""
-        library = entry.get("library") or entry.get("Library") or None
-        if symbol:
-            requested.setdefault(symbol, library)
-    if eboot is not None:
-        for symbol in eboot.imports:
-            requested.setdefault(symbol, None)
-    files: list[str] = list(eboot.needed) if eboot is not None else []
-    for library in requested.values():
-        if library and library not in files:
-            files.append(library)
-    modules: dict[str, dict[str, dict]] = collections.OrderedDict((name, collections.OrderedDict()) for name in files)
+def collect(titles: list[tuple[list[dict], Eboot | None]]) -> tuple[list[str], dict[str, dict[str, dict]], list[str]]:
+    """Union of the imports of every title: each title keeps its own eboot for the module and library ids behind its symbols."""
+    files: list[str] = []
+    modules: dict[str, dict[str, dict]] = collections.OrderedDict()
     unresolved: list[str] = []
-    for symbol, library in requested.items():
-        nid, library_id, module_id = split_nid(symbol)
-        target = library
-        if target is None and eboot is not None and module_id is not None:
-            target = eboot.module_file(module_id)
-        if target is None:
-            unresolved.append(symbol)
-            target = "libkernel.prx" if "libkernel.prx" in modules else files[0]
-        if target not in modules:
-            modules[target] = collections.OrderedDict()
-            files.append(target)
-        record = modules[target].setdefault(nid, {"nid": nid, "symbols": [], "library": None})
-        record["symbols"].append(symbol)
-        if eboot is not None and library_id is not None:
-            record["library"] = eboot.libraries.get(library_id)
+    for registry, eboot in titles:
+        requested: dict[str, str | None] = {}
+        for entry in registry:
+            symbol = entry.get("nid") or entry.get("Nid") or ""
+            library = entry.get("library") or entry.get("Library") or None
+            if symbol:
+                requested.setdefault(symbol, library)
+        if eboot is not None:
+            for symbol in eboot.imports:
+                requested.setdefault(symbol, None)
+            for needed in eboot.needed:
+                if needed not in files:
+                    files.append(needed)
+        for library in requested.values():
+            if library and library not in files:
+                files.append(library)
+        for name in files:
+            modules.setdefault(name, collections.OrderedDict())
+        for symbol, library in requested.items():
+            nid, library_id, module_id = split_nid(symbol)
+            target = library
+            if target is None and eboot is not None and module_id is not None:
+                target = eboot.module_file(module_id)
+            if target is None:
+                unresolved.append(symbol)
+                target = "libkernel.prx" if "libkernel.prx" in modules else files[0]
+            if target not in modules:
+                modules[target] = collections.OrderedDict()
+                files.append(target)
+            record = modules[target].setdefault(nid, {"nid": nid, "symbols": [], "library": None})
+            if symbol not in record["symbols"]:
+                record["symbols"].append(symbol)
+            if eboot is not None and library_id is not None and record["library"] is None:
+                record["library"] = eboot.libraries.get(library_id)
     return files, modules, unresolved
 
 
@@ -829,8 +837,10 @@ def write_cmake(out: Path, files: list[str], real: dict[str, ProsperoLibrary], v
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--registry", required=True, type=Path, help="<output>.registry.json written by relinker --registry")
-    parser.add_argument("--eboot", type=Path, help="original eboot.bin (plain ELF or fake SELF) for DT_NEEDED and module ids")
+    parser.add_argument("--registry", required=True, type=Path, action="append",
+                        help="<output>.registry.json written by relinker --registry; repeat the option to build the union of several titles")
+    parser.add_argument("--eboot", type=Path, action="append", default=[],
+                        help="original eboot.bin (plain ELF or fake SELF) for DT_NEEDED and module ids; one per --registry, in the same order")
     parser.add_argument("--shadps4", type=Path, help="shadPS4 checkout (repository root or src/core) used to name functions")
     parser.add_argument("--real", default="libc.prx,libkernel.prx", help="comma-separated modules built from core/libs/prx (empty for stubs only)")
     parser.add_argument("--vendored", action="append", default=[], metavar="FILE=DIR[:MODULE]",
@@ -838,14 +848,19 @@ def main() -> int:
     parser.add_argument("--out", type=Path, default=Path(__file__).resolve().parent.parent / "core" / "libs" / "orbis")
     args = parser.parse_args()
 
-    registry = load_registry(args.registry)
-    eboot = Eboot(args.eboot) if args.eboot else None
+    if args.eboot and len(args.eboot) != len(args.registry):
+        raise SystemExit("--eboot must be given once per --registry (or not at all)")
+    titles: list[tuple[list[dict], Eboot | None]] = []
+    for index, registry_path in enumerate(args.registry):
+        titles.append((load_registry(registry_path), Eboot(args.eboot[index]) if args.eboot else None))
+    registry = [entry for title_registry, _ in titles for entry in title_registry]
+    eboot = titles[0][1]
     names = ShadPs4Names(args.shadps4)
     libs_root = args.out.resolve().parent
     real_names = [name for name in args.real.split(",") if name]
     real: dict[str, ProsperoLibrary] = {}
 
-    files, modules, unresolved = collect(registry, eboot)
+    files, modules, unresolved = collect(titles)
     for file_name in files:
         if file_name in real_names:
             stem = file_name[:file_name.rfind(".")]
@@ -900,8 +915,8 @@ def main() -> int:
     write_cmake(out, files, real, vendored)
 
     manifest = {
-        "registry": str(args.registry),
-        "eboot": str(args.eboot) if args.eboot else None,
+        "registry": [str(path) for path in args.registry],
+        "eboot": [str(path) for path in args.eboot],
         "real": sorted(real),
         "vendored": {name: library.directory for name, library in vendored.items()},
         "unresolvedModules": unresolved,
@@ -918,9 +933,10 @@ def main() -> int:
 
     total = sum(len(n) for n in modules.values())
     sources = collections.Counter(record["source"] for nids in modules.values() for record in nids.values())
-    print(f"registry entries: {len(registry)}; unique NIDs: {total}; modules: {len(files)}")
-    if eboot is not None:
-        print(f"eboot DT_NEEDED: {len(eboot.needed)}; undefined symbols: {len(eboot.imports)}; module ids: {len(eboot.modules)}; library ids: {len(eboot.libraries)}")
+    print(f"titles: {len(titles)}; registry entries: {len(registry)}; unique NIDs: {total}; modules: {len(files)}")
+    for title_registry, title_eboot in titles:
+        if title_eboot is not None:
+            print(f"eboot DT_NEEDED: {len(title_eboot.needed)}; undefined symbols: {len(title_eboot.imports)}; module ids: {len(title_eboot.modules)}; library ids: {len(title_eboot.libraries)}; registry entries: {len(title_registry)}")
     if names.implemented or names.names:
         print(f"shadPS4: {len(names.implemented)} LIB_FUNCTION, {len(names.objects)} LIB_OBJ, {len(names.names)} aerolib names")
     print("name sources: " + ", ".join(f"{k}={v}" for k, v in sorted(sources.items())))

@@ -210,6 +210,18 @@ struct ScriptedPress {
     std::uint64_t startMs;
     u32 buttons;
     std::uint64_t durationMs;
+    int lx = -1;
+    int ly = -1;
+    int rx = -1;
+    int ry = -1;
+};
+
+struct ScriptedState {
+    u32 buttons = 0;
+    int lx = -1;
+    int ly = -1;
+    int rx = -1;
+    int ry = -1;
 };
 
 std::vector<ScriptedPress> script;
@@ -224,21 +236,32 @@ void LoadScript() {
     const char* path = std::getenv("ORBIS_PAD_SCRIPT");
     if (path == nullptr) return;
     std::ifstream file(path);
-    std::uint64_t start = 0, duration = 0;
-    std::string buttons;
-    while (file >> start >> buttons >> duration) {
-        script.push_back({start, static_cast<u32>(std::strtoul(buttons.c_str(), nullptr, 0)), duration});
+    std::string line;
+    while (std::getline(file, line)) {
+        if (line.empty() || line[0] == '#') continue;
+        std::uint64_t start = 0, duration = 0;
+        char buttons[32] = {};
+        int lx = -1, ly = -1, rx = -1, ry = -1;
+        const int fields = std::sscanf(line.c_str(), "%llu %31s %llu %d %d %d %d", &start, buttons, &duration, &lx, &ly, &rx, &ry);
+        if (fields < 3) continue;
+        script.push_back({start, static_cast<u32>(std::strtoul(buttons, nullptr, 0)), duration, lx, ly, rx, ry});
     }
     std::fprintf(stderr, "[Pad] scripted input: %zu presses from %s\n", script.size(), path);
     std::fflush(stderr);
 }
 
-u32 ScriptedButtons(std::uint64_t elapsedMs) {
-    u32 buttons = 0;
+ScriptedState Scripted(std::uint64_t elapsedMs) {
+    ScriptedState state;
     for (const auto& press : script) {
-        if (elapsedMs >= press.startMs && elapsedMs < press.startMs + press.durationMs) buttons |= press.buttons;
+        if (elapsedMs >= press.startMs && elapsedMs < press.startMs + press.durationMs) {
+            state.buttons |= press.buttons;
+            if (press.lx >= 0) state.lx = press.lx;
+            if (press.ly >= 0) state.ly = press.ly;
+            if (press.rx >= 0) state.rx = press.rx;
+            if (press.ry >= 0) state.ry = press.ry;
+        }
     }
-    return buttons;
+    return state;
 }
 
 void Trace(const char* function, const char* nid) {
@@ -329,7 +352,12 @@ ORBIS_SYSV_ABI s32 orbis_scePadReadState(s32 handle, PadData* data) {
     const auto now = std::chrono::steady_clock::now();
     if (readCount++ == 0) firstRead = now;
     const auto elapsedMs = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(now - firstRead).count());
-    buttons |= ScriptedButtons(elapsedMs);
+    const ScriptedState scripted = Scripted(elapsedMs);
+    buttons |= scripted.buttons;
+    if (scripted.lx >= 0) data->leftStick.x = static_cast<u8>(scripted.lx);
+    if (scripted.ly >= 0) data->leftStick.y = static_cast<u8>(scripted.ly);
+    if (scripted.rx >= 0) data->rightStick.x = static_cast<u8>(scripted.rx);
+    if (scripted.ry >= 0) data->rightStick.y = static_cast<u8>(scripted.ry);
     if (buttons != lastButtons) {
         std::fprintf(stderr, "[Pad] t=%llu ms buttons %#x -> %#x (read #%llu)\n", static_cast<unsigned long long>(elapsedMs), lastButtons, buttons,
                      static_cast<unsigned long long>(readCount));

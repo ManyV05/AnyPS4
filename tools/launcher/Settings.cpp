@@ -81,6 +81,7 @@ Settings LoadSettings() {
     settings.pipelineCache = ReadInt(file, L"pipeline_cache", 1) != 0;
     settings.headless = ReadInt(file, L"headless", 0) != 0;
     settings.writeWatch = ReadInt(file, L"write_watch", 0) != 0;
+    settings.diagnostics = ReadInt(file, L"diagnostics", 0) != 0;
     settings.bgmVolume = ReadInt(file, L"bgm_volume", 70);
     settings.mainVolume = ReadInt(file, L"main_volume", 100);
     settings.musicFloor = ReadInt(file, L"music_floor", 40);
@@ -112,6 +113,7 @@ void SaveSettings(const Settings& settings) {
     WriteInt(file, L"pipeline_cache", settings.pipelineCache ? 1 : 0);
     WriteInt(file, L"headless", settings.headless ? 1 : 0);
     WriteInt(file, L"write_watch", settings.writeWatch ? 1 : 0);
+    WriteInt(file, L"diagnostics", settings.diagnostics ? 1 : 0);
     WriteInt(file, L"bgm_volume", settings.bgmVolume);
     WriteInt(file, L"main_volume", settings.mainVolume);
     WriteInt(file, L"music_floor", settings.musicFloor);

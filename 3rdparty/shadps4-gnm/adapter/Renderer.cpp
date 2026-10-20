@@ -257,7 +257,8 @@ bool PresentFlip(const Libraries::VideoOut::BufferAttribute& attribute, VAddr ad
                      vk::to_string(swapchain.GetSurfaceFormat().format));
         }
         static const u64 dump_flip = [] { const char* v = std::getenv("ORBIS_GNM_DUMP_FRAME"); return v != nullptr ? std::strtoull(v, nullptr, 10) : 0; }();
-        if (dump_flip != 0 && r.flips == dump_flip) {
+        static const u64 dump_every = [] { const char* v = std::getenv("ORBIS_GNM_DUMP_EVERY"); return v != nullptr ? std::strtoull(v, nullptr, 10) : 0; }();
+        if ((dump_flip != 0 && r.flips == dump_flip) || (dump_every != 0 && r.flips % dump_every == 0)) {
             ReadbackFrame frame{};
             if (ReadbackFlip(attribute, address, frame)) {
                 const auto path = Common::FS::GetUserPath(Common::FS::PathType::ScreenshotsDir) / fmt::format("frame-{}.ppm", r.flips);

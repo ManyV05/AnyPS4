@@ -12,7 +12,7 @@ using LineSink = std::function<void(const std::wstring&)>;
 bool RunCaptured(const std::wstring& commandLine, const std::wstring& workingDirectory, LineSink sink, int& exitCode);
 
 bool StartDetached(const std::wstring& executable, const std::wstring& workingDirectory, const std::vector<std::pair<std::wstring, std::wstring>>& environment,
-                   std::wstring& error);
+                   const std::wstring& logFile, std::wstring& error);
 
 std::wstring Quote(const std::wstring& argument);
 

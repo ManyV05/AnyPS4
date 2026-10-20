@@ -18,6 +18,8 @@
 #include "core/libraries/error_codes.h"
 #include "core/libraries/libs.h"
 #include "core/libraries/ngs2/ngs2.h"
+#include "core/libraries/ngs2/ngs2_sampler.h"
+#include "core/libraries/ngs2/ngs2_mastering.h"
 #include "core/libraries/ngs2/ngs2_custom.h"
 #include "core/libraries/ngs2/ngs2_error.h"
 #include "core/libraries/ngs2/ngs2_geom.h"
@@ -257,6 +259,8 @@ struct VoiceBlock {
     u32 size;
     u32 num_repeats;
     u32 num_skip_samples;
+    uintptr_t user_data{};
+    const void* base{};
 };
 
 struct Voice {
@@ -272,6 +276,7 @@ struct Voice {
     std::vector<VoiceBlock> blocks; // kept across Play/Stop so sounds can replay
     float volume{1.0f};
     float matrix_gain{1.0f};
+    float peak_volume{};   // highest port volume since the last Play (what a held track plays at)
     float pitch{1.0f};
     uintptr_t patch_dest{}; // mastering voice this voice is routed into
     u64 decoded_samples{};
@@ -319,12 +324,54 @@ struct Voice {
 };
 
 std::mutex engine_mutex;
+// AnyPS4: ORBIS_NGS2_TRACE=1 logs every voice event, volume, matrix and setup
+// without the caps below, to reconstruct what a title asks of its voices.
+const bool trace_all = std::getenv("ORBIS_NGS2_TRACE") != nullptr;
+// AnyPS4: the fork kept music voices alive through Stop/Kill and floored their
+// volume because the title fades a track out one second after starting it.
+// The trace shows that is the title's intro-to-loop crossfade between two
+// voices, so by default Stop, Kill and the requested volume are honoured;
+// ORBIS_NGS2_MUSIC_HOLD=1 restores the fork's behaviour.
+const bool music_hold = std::getenv("ORBIS_NGS2_MUSIC_HOLD") != nullptr;
+// ORBIS_NGS2_MUSIC_FAITHFUL=1 disables even the scoped hold: every Stop and Kill ends the track.
+const bool music_faithful = std::getenv("ORBIS_NGS2_MUSIC_FAITHFUL") != nullptr;
 std::unordered_map<uintptr_t, Voice> voice_registry;         // voice handle -> voice
 std::unordered_map<uintptr_t, uintptr_t> rack_system;        // rack handle -> system handle
+// AnyPS4: rack ids by rack handle, and per-bus peak meters (left, right) of
+// what was mixed into each mastering voice on the last render. The title polls
+// the mastering voices' state every grain and drives its music fades and
+// dialogue ducking from the PLAYING flag and these meters.
+constexpr u32 kMasteringRackId = 12288;
+std::unordered_map<uintptr_t, u32> rack_ids;
+std::unordered_map<uintptr_t, std::array<float, 2>> bus_peak;
+
+// The title starts a track, fades it out within its first second and stops it
+// even when nothing replaces it (the title screen would be silent). Hold such a
+// track at the volume it reached, unless another music voice is already
+// playing or it had played for a while: then the Stop is a real track change.
+bool ShouldHoldMusic(uintptr_t voice_handle, const struct Voice& voice);
+
+bool IsMasteringVoice(uintptr_t voice_handle) {
+    const auto it = rack_ids.find(voice_handle & ~0xFFFFFull);
+    return it != rack_ids.end() && it->second == kMasteringRackId;
+}
 u64 render_seq{};                                            // SystemRender call counter
 
 uintptr_t RackOfVoice(uintptr_t voice_handle) {
     return voice_handle & ~0xFFFFFull;
+}
+
+bool ShouldHoldMusic(uintptr_t voice_handle, const Voice& voice) {
+    if (music_faithful || voice.decoded_samples > 48000ull * 3) {
+        return false;
+    }
+    for (const auto& [other_handle, other] : voice_registry) {
+        if (other_handle != voice_handle && other.is_music && other.playing && other.has_data && !other.stop_requested &&
+            other.volume > 0.01f) {
+            return false;
+        }
+    }
+    return voice.peak_volume > 0.01f;
 }
 
 // True for handles we minted in MakeRackHandle/MakeVoiceHandle. A synthetic
@@ -856,9 +903,55 @@ s32 PS4_SYSV_ABI sceNgs2ParseWaveformData(const void* data, size_t dataSize,
                  outInfo->format.sampleRate, outInfo->numSamples, outInfo->dataSize);
         return ORBIS_OK;
     }
+    // AnyPS4: raw "VAGp" (HEVAG/PS-ADPCM) files, which this title uses for every
+    // sound effect. Big-endian data size at 0x0C and sample rate at 0x10, the
+    // channel count at 0x1E; 16-byte units of 28 samples. The data offset stays
+    // 0 so the decoder still sees the header and takes its rate and channels.
+    if (data != nullptr && dataSize >= 64 && std::memcmp(data, "VAGp", 4) == 0) {
+        const auto* bytes = static_cast<const u8*>(data);
+        auto be32 = [&](size_t at) { return (u32(bytes[at]) << 24) | (u32(bytes[at + 1]) << 16) | (u32(bytes[at + 2]) << 8) | u32(bytes[at + 3]); };
+        const u32 channels = std::max<u32>(bytes[0x1E], 1u);
+        const u32 rate = be32(0x10) != 0 ? be32(0x10) : 44100u;
+        const u32 body = std::min<u32>(be32(0x0C), static_cast<u32>(dataSize - 48));
+        const u32 units = body / (16u * channels);
+        std::memset(outInfo, 0, sizeof(OrbisNgs2WaveformInfo));
+        outInfo->format.waveformType = 0;
+        outInfo->format.numChannels = channels;
+        outInfo->format.sampleRate = rate;
+        outInfo->dataOffset = 0;
+        outInfo->dataSize = static_cast<u32>(dataSize);
+        outInfo->numSamples = units * 28u;
+        outInfo->audioUnitSize = 16u * channels;
+        outInfo->numAudioUnitSamples = 28;
+        outInfo->numAudioUnitPerFrame = 1;
+        outInfo->audioFrameSize = 16u * channels;
+        outInfo->numAudioFrameSamples = 28;
+        outInfo->numBlocks = 1;
+        outInfo->aBlock[0].dataOffset = 0;
+        outInfo->aBlock[0].dataSize = static_cast<u32>(dataSize);
+        outInfo->aBlock[0].numSamples = outInfo->numSamples;
+        static std::atomic<int> vag_logs{0};
+        if (vag_logs++ < 20) {
+            LOG_INFO(Lib_Ngs2, "parsed VAG: channels = {}, rate = {}, samples = {}, dataSize = {}, name = {:.16}", channels, rate,
+                     outInfo->numSamples, dataSize, reinterpret_cast<const char*>(bytes + 0x20));
+        }
+        return ORBIS_OK;
+    }
     // Unknown container: report a plausible non-zero waveform so duration math
     // in games never divides by zero.
     LOG_WARNING(Lib_Ngs2, "unrecognized waveform data (size = {}), using defaults", dataSize);
+    if (trace_all) {
+        static std::atomic<int> dumps{0};
+        if (dumps++ < 40 && data != nullptr) {
+            std::string hex, text;
+            const auto* bytes = static_cast<const u8*>(data);
+            for (size_t b = 0; b < std::min<size_t>(dataSize, 48); ++b) {
+                hex += fmt::format("{:02x} ", bytes[b]);
+                text += (bytes[b] >= 0x20 && bytes[b] < 0x7f) ? static_cast<char>(bytes[b]) : '.';
+            }
+            LOG_INFO(Lib_Ngs2, "unrecognized waveform head: {} |{}|", hex, text);
+        }
+    }
     std::memset(outInfo, 0, sizeof(OrbisNgs2WaveformInfo));
     outInfo->format.numChannels = 2;
     outInfo->format.sampleRate = 48000;
@@ -903,6 +996,7 @@ s32 PS4_SYSV_ABI sceNgs2RackCreate(OrbisNgs2Handle systemHandle, u32 rackId,
         *outHandle = MakeRackHandle();
         std::scoped_lock lk{engine_mutex};
         rack_system[*outHandle] = systemHandle;
+        rack_ids[*outHandle] = rackId;
         LOG_INFO(Lib_Ngs2, "rack {:#x} (id {}) on system {:#x}", *outHandle, rackId, systemHandle);
     }
     return ORBIS_OK;
@@ -921,6 +1015,7 @@ s32 PS4_SYSV_ABI sceNgs2RackCreateWithAllocator(OrbisNgs2Handle systemHandle, u3
         *outHandle = MakeRackHandle();
         std::scoped_lock lk{engine_mutex};
         rack_system[*outHandle] = systemHandle;
+        rack_ids[*outHandle] = rackId;
         LOG_INFO(Lib_Ngs2, "rack {:#x} (id {}) on system {:#x}", *outHandle, rackId, systemHandle);
     }
     return ORBIS_OK;
@@ -1129,6 +1224,36 @@ s32 PS4_SYSV_ABI sceNgs2SystemRender(OrbisNgs2Handle systemHandle,
     }
     std::scoped_lock lk{engine_mutex};
     const u64 seq = ++render_seq;
+    if (trace_all && seq % 2000 < 3) {
+        std::string buffers;
+        for (u32 i = 0; i < numBufferInfo; ++i) {
+            buffers += fmt::format("{}[{}ch {}B] ", i, aBufferInfo[i].numChannels, aBufferInfo[i].bufferSize);
+        }
+        u32 playing = 0, pending = 0, other_system = 0;
+        for (auto& [handle, voice] : voice_registry) {
+            const auto rack_it = rack_system.find(RackOfVoice(handle));
+            if (rack_it != rack_system.end() && rack_it->second != systemHandle) {
+                if (voice.playing) ++other_system;
+                continue;
+            }
+            if (voice.playing) ++playing;
+            if (voice.pending_play) ++pending;
+        }
+        LOG_INFO(Lib_Ngs2, "render #{} system {:#x}: buffers {}; voices playing {} (other systems {}), pending data {}",
+                 seq, systemHandle, buffers, playing, other_system, pending);
+        for (auto& [handle, voice] : voice_registry) {
+            if (!voice.playing || !voice.has_data) {
+                continue;
+            }
+            float peak = 0.0f;
+            for (float sample : voice.grain_cache) {
+                peak = std::max(peak, std::fabs(sample));
+            }
+            LOG_INFO(Lib_Ngs2, "  voice {:#x}: music {}, vol {:.3f}, matrix {:.3f}, pitch {:.2f}, grain peak {:.3f}, pos {:.1f}s, starved {}, paused {}, blocks {}",
+                     handle, voice.is_music, voice.volume, voice.matrix_gain, voice.pitch, peak,
+                     double(voice.decoded_samples) / 48000.0, voice.starved_renders, voice.paused, voice.blocks.size());
+        }
+    }
     for (u32 i = 0; i < numBufferInfo; ++i) {
         auto& info = aBufferInfo[i];
         const u32 channels = std::max(1u, info.numChannels);
@@ -1152,6 +1277,9 @@ s32 PS4_SYSV_ABI sceNgs2SystemRender(OrbisNgs2Handle systemHandle,
             continue;
         }
         auto* out = static_cast<float*>(info.buffer);
+        for (auto& [bus, peak] : bus_peak) {
+            peak = {0.0f, 0.0f};
+        }
         for (auto& [handle, voice] : voice_registry) {
             if (!voice.playing || voice.paused || !voice.has_data) {
                 continue;
@@ -1186,7 +1314,7 @@ s32 PS4_SYSV_ABI sceNgs2SystemRender(OrbisNgs2Handle systemHandle,
                 // Gain: port volume; for music also the matrix peak (the game's
                 // fade engine ramps music in/out through matrix levels — without
                 // it, crossfade successor tracks play at their initial silence).
-                float gain = voice.volume;
+                float gain = voice.stop_requested ? voice.peak_volume : voice.volume;
                 if (voice.is_music) {
                     gain *= voice.matrix_gain;
                     // Workaround: the game demands near-silence from music tracks
@@ -1197,13 +1325,14 @@ s32 PS4_SYSV_ABI sceNgs2SystemRender(OrbisNgs2Handle systemHandle,
                         const char* value = std::getenv("ORBIS_NGS2_MUSIC_FLOOR");
                         return value != nullptr ? static_cast<float>(std::atof(value)) : 0.4f;
                     }();
-                    if (gain < 0.25f) {
+                    if (music_hold && gain < 0.25f) {
                         gain = music_floor;
                     }
                 }
                 ProduceGrain(voice, num_samples, std::clamp(gain, 0.0f, 4.0f));
                 voice.clock_samples += num_samples;
             }
+            float peak_left = 0.0f, peak_right = 0.0f;
             for (u32 s = 0; s < num_samples; ++s) {
                 const float* src = voice.grain_cache.data() + size_t(s) * 2;
                 float* dst = out + size_t(s) * channels;
@@ -1211,6 +1340,13 @@ s32 PS4_SYSV_ABI sceNgs2SystemRender(OrbisNgs2Handle systemHandle,
                 if (channels > 1) {
                     dst[1] += src[1];
                 }
+                peak_left = std::max(peak_left, std::fabs(src[0]));
+                peak_right = std::max(peak_right, std::fabs(src[1]));
+            }
+            if (!voice.stop_requested) {
+                auto& meter = bus_peak[voice.patch_dest];
+                meter[0] = std::max(meter[0], peak_left);
+                meter[1] = std::max(meter[1], peak_right);
             }
         }
         {
@@ -1323,6 +1459,12 @@ s32 PS4_SYSV_ABI sceNgs2VoiceControl(OrbisNgs2Handle voiceHandle,
             if (hdr->size >= sizeof(SamplerVoiceSetupParam)) {
                 const auto* p = reinterpret_cast<const SamplerVoiceSetupParam*>(hdr);
                 voice.format = p->format;
+                if (trace_all) {
+                    LOG_INFO(Lib_Ngs2, "setup voice {:#x} rack {:#x}: type {:#x}, {} ch, {} Hz, config {:#x}, flags {:#x}",
+                             voiceHandle, RackOfVoice(voiceHandle), static_cast<u32>(p->format.waveformType),
+                             static_cast<u32>(p->format.numChannels), static_cast<u32>(p->format.sampleRate),
+                             static_cast<u32>(p->format.configData), static_cast<u32>(p->flags));
+                }
                 voice.blocks.clear();
                 voice.known = true;
                 voice.playing = false;
@@ -1346,7 +1488,7 @@ s32 PS4_SYSV_ABI sceNgs2VoiceControl(OrbisNgs2Handle voiceHandle,
                         }
                         voice.blocks.push_back({static_cast<const u8*>(p->data) + blk.dataOffset,
                                                 blk.dataSize, blk.numRepeats,
-                                                blk.numSkipSamples});
+                                                blk.numSkipSamples, blk.userData, p->data});
                         voice.has_data = true;
                         voice.known = true;
                     }
@@ -1378,8 +1520,15 @@ s32 PS4_SYSV_ABI sceNgs2VoiceControl(OrbisNgs2Handle voiceHandle,
         case VoicePortVolume: {
             if (hdr->size >= sizeof(VoicePortVolumeParam)) {
                 const auto* p = reinterpret_cast<const VoicePortVolumeParam*>(hdr);
+                if (trace_all) {
+                    LOG_INFO(Lib_Ngs2, "volume voice {:#x} port {} = {:.4f} (music {}, playing {})", voiceHandle, p->port,
+                             p->level, voice.is_music, voice.playing);
+                }
                 if (p->port == 0 && std::isfinite(p->level)) {
                     voice.volume = std::clamp(p->level, 0.0f, 4.0f);
+                    if (!voice.stop_requested) {
+                        voice.peak_volume = std::max(voice.peak_volume, voice.volume);
+                    }
                     if (voice.is_music) {
                         static std::atomic<int> vol_trace{0};
                         if (vol_trace++ < 400) {
@@ -1406,6 +1555,10 @@ s32 PS4_SYSV_ABI sceNgs2VoiceControl(OrbisNgs2Handle voiceHandle,
                         if (std::isfinite(p->aLevel[l])) {
                             peak = std::max(peak, std::fabs(p->aLevel[l]));
                         }
+                    }
+                    if (trace_all && std::fabs(peak - voice.matrix_gain) > 0.01f) {
+                        LOG_INFO(Lib_Ngs2, "matrix voice {:#x} id {} levels {}: peak {:.3f} (music {}, playing {})",
+                                 voiceHandle, p->matrixId, p->numLevels, peak, voice.is_music, voice.playing);
                     }
                     if (voice.is_music && std::fabs(peak - voice.matrix_gain) > 0.05f) {
                         LOG_INFO(Lib_Ngs2,
@@ -1456,14 +1609,15 @@ s32 PS4_SYSV_ABI sceNgs2VoiceControl(OrbisNgs2Handle voiceHandle,
             const auto event = reinterpret_cast<const OrbisNgs2VoiceEventParam*>(hdr)->eventId;
             // Capped lifecycle trace to reconstruct streaming/music behavior.
             static std::atomic<int> trace_count{0};
-            if (trace_count++ < 400) {
+            if (trace_all || trace_count++ < 400) {
                 u64 total = 0;
                 for (const auto& b : voice.blocks) {
                     total += b.size;
                 }
-                LOG_INFO(Lib_Ngs2, "evt {} voice {:#x} (blocks = {}, bytes = {}, at9 = {})",
-                         event, voiceHandle, voice.blocks.size(), total,
-                         IsAt9Format(voice.format));
+                LOG_INFO(Lib_Ngs2, "evt {} voice {:#x} rack {:#x} (blocks = {}, bytes = {}, at9 = {}, vol {:.3f}, matrix {:.3f}, patch {:#x}, pos {:.1f}s)",
+                         event, voiceHandle, RackOfVoice(voiceHandle), voice.blocks.size(), total,
+                         IsAt9Format(voice.format), voice.volume, voice.matrix_gain, voice.patch_dest,
+                         double(voice.decoded_samples) / 48000.0);
             }
             switch (event) {
             case EventPlay: {
@@ -1492,6 +1646,8 @@ s32 PS4_SYSV_ABI sceNgs2VoiceControl(OrbisNgs2Handle voiceHandle,
                 }
                 voice.playing = true;
                 voice.paused = false;
+                voice.stop_requested = false;
+                voice.peak_volume = voice.volume;
                 static std::unordered_set<uintptr_t> logged_handles;
                 if (logged_handles.insert(voiceHandle).second) {
                     u64 total_bytes = 0;
@@ -1517,9 +1673,10 @@ s32 PS4_SYSV_ABI sceNgs2VoiceControl(OrbisNgs2Handle voiceHandle,
             case EventKill:
                 // The game also aborts music via Kill; suppress it the same way
                 // as Stop (the next music track's Play retires this voice).
-                if (voice.playing && voice.is_music) {
+                if (voice.playing && voice.is_music && (music_hold || ShouldHoldMusic(voiceHandle, voice))) {
                     voice.stop_requested = true;
-                    LOG_INFO(Lib_Ngs2, "suppressing Kill on music voice {:#x}", voiceHandle);
+                    LOG_INFO(Lib_Ngs2, "holding music voice {:#x} through Kill at {:.1f}s (volume {:.3f})", voiceHandle,
+                             double(voice.decoded_samples) / 48000.0, voice.peak_volume);
                     break;
                 }
                 // Kill frees the voice entirely.
@@ -1543,9 +1700,10 @@ s32 PS4_SYSV_ABI sceNgs2VoiceControl(OrbisNgs2Handle voiceHandle,
                 for (const auto& b : voice.blocks) {
                     total_bytes += b.size;
                 }
-                if (voice.playing && total_bytes > 1'000'000) {
+                if (voice.playing && total_bytes > 1'000'000 && (music_hold || ShouldHoldMusic(voiceHandle, voice))) {
                     voice.stop_requested = true;
-                    LOG_INFO(Lib_Ngs2, "suppressing Stop on music voice {:#x}", voiceHandle);
+                    LOG_INFO(Lib_Ngs2, "holding music voice {:#x} through Stop at {:.1f}s (volume {:.3f})", voiceHandle,
+                             double(voice.decoded_samples) / 48000.0, voice.peak_volume);
                     break;
                 }
                 // Stop halts playback but keeps the loaded waveform so the
@@ -1620,9 +1778,34 @@ s32 PS4_SYSV_ABI sceNgs2VoiceGetState(OrbisNgs2Handle voiceHandle, OrbisNgs2Voic
             // sampler state: stateFlags, envelopeHeight, peakHeight, reserved,
             // then u64 numDecodedSamples.
             const Voice& v = it->second;
-            // Dataless control/mastering voices must not report PLAYING: the
-            // game's ducking system lowers music whenever voice audio is active,
-            // and a phantom always-playing voice ducks it permanently.
+            // A mastering voice is a bus: once the title played it, it stays
+            // PLAYING and its meters show what was mixed into it (zero when
+            // silent). The fork reported it idle with meters stuck at one,
+            // which made the title fade its music out after a second and, in
+            // the other variant, duck it permanently.
+            if (IsMasteringVoice(voiceHandle)) {
+                outState->stateFlags = NGS2_VOICE_STATE_FLAG_INUSE | NGS2_VOICE_STATE_FLAG_ACTIVE |
+                                       (v.playing ? NGS2_VOICE_STATE_FLAG_PLAYING : 0);
+                if (stateSize >= sizeof(OrbisNgs2MasteringVoiceState)) {
+                    auto* state = reinterpret_cast<OrbisNgs2MasteringVoiceState*>(outState);
+                    const auto meter = bus_peak.find(voiceHandle);
+                    const float left = meter != bus_peak.end() ? std::min(meter->second[0], 1.0f) : 0.0f;
+                    const float right = meter != bus_peak.end() ? std::min(meter->second[1], 1.0f) : 0.0f;
+                    state->limiterPeakLevel = std::max(left, right);
+                    state->limiterPressLevel = 0.0f;
+                    state->aInputPeakHeight[0] = left;
+                    state->aInputPeakHeight[1] = right;
+                    state->aOutputPeakHeight[0] = left;
+                    state->aOutputPeakHeight[1] = right;
+                }
+                if (trace_all) {
+                    static std::atomic<int> bus_logs{0};
+                    if (bus_logs++ < 24) {
+                        LOG_INFO(Lib_Ngs2, "state mastering {:#x} size {}: flags {:#x}", voiceHandle, stateSize, outState->stateFlags);
+                    }
+                }
+                return ORBIS_OK;
+            }
             const bool playing_now = v.playing && v.has_data && v.starved_renders < 2;
             outState->stateFlags =
                 NGS2_VOICE_STATE_FLAG_INUSE | NGS2_VOICE_STATE_FLAG_ACTIVE |
@@ -1633,6 +1816,39 @@ s32 PS4_SYSV_ABI sceNgs2VoiceGetState(OrbisNgs2Handle voiceHandle, OrbisNgs2Voic
                 std::memcpy(&words[1], &height, sizeof(float));
                 std::memcpy(&words[2], &height, sizeof(float));
                 std::memcpy(&words[4], &v.decoded_samples, sizeof(u64));
+            }
+            // AnyPS4: the sampler state also reports the bytes consumed, the
+            // user data of the block being played and the waveform base
+            // pointer; titles drive their streaming and fades from them.
+            if (stateSize >= sizeof(OrbisNgs2SamplerVoiceState)) {
+                u64 consumed = 0;
+                uintptr_t user_data = 0;
+                const void* base = nullptr;
+                for (size_t b = 0; b < v.blocks.size(); ++b) {
+                    if (b < v.block_index) {
+                        consumed += v.blocks[b].size;
+                    } else if (b == v.block_index) {
+                        consumed += std::min<u64>(v.byte_pos, v.blocks[b].size);
+                        user_data = v.blocks[b].user_data;
+                        base = v.blocks[b].base;
+                    }
+                }
+                if (!v.blocks.empty() && v.block_index >= v.blocks.size()) {
+                    user_data = v.blocks.back().user_data;
+                    base = v.blocks.back().base;
+                }
+                auto* state = reinterpret_cast<OrbisNgs2SamplerVoiceState*>(outState);
+                state->decodedDataSize = consumed;
+                state->userData = user_data;
+                state->waveformData = base;
+            }
+            if (trace_all) {
+                static std::atomic<int> state_logs{0};
+                if (state_logs++ < 40) {
+                    LOG_INFO(Lib_Ngs2, "state voice {:#x} size {}: flags {:#x}, playing {}, decoded {} samples, block {}/{}, byte {}",
+                             voiceHandle, stateSize, outState->stateFlags, playing_now, v.decoded_samples, v.block_index,
+                             v.blocks.size(), v.byte_pos);
+                }
             }
         } else if (IsSyntheticHandle(voiceHandle)) {
             // A never-configured voice slot: honestly empty (buffer already zeroed).
@@ -1657,8 +1873,9 @@ s32 PS4_SYSV_ABI sceNgs2VoiceGetStateFlags(OrbisNgs2Handle voiceHandle, u32* out
         std::scoped_lock lk{engine_mutex};
         const auto it = voice_registry.find(voiceHandle);
         if (it != voice_registry.end() && it->second.known) {
-            const bool playing_now = it->second.playing && it->second.has_data &&
-                                     it->second.starved_renders < 2;
+            const bool playing_now = IsMasteringVoice(voiceHandle)
+                                         ? it->second.playing
+                                         : it->second.playing && it->second.has_data && it->second.starved_renders < 2;
             *outStateFlags = NGS2_VOICE_STATE_FLAG_INUSE | NGS2_VOICE_STATE_FLAG_ACTIVE |
                              (playing_now ? NGS2_VOICE_STATE_FLAG_PLAYING : 0);
         } else if (IsSyntheticHandle(voiceHandle)) {
