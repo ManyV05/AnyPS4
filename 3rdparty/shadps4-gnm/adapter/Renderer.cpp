@@ -6,6 +6,9 @@
 #include "video_core/renderer_vulkan/vk_common.h"
 #include <vk_mem_alloc.h>
 #include <windows.h>
+#include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cstring>
 #include <exception>
 #include <memory>
@@ -29,6 +32,12 @@
 #include "video_core/texture_cache/image.h"
 #include "video_core/texture_cache/texture_cache.h"
 
+std::atomic<int> anyps4_trace_draws{0};
+
+std::atomic<int>& AnyPs4TraceDraws() {
+    return anyps4_trace_draws;
+}
+
 namespace AnyPs4 {
 
 struct ReadbackFrame {
@@ -44,6 +53,73 @@ bool ReadbackFlip(const Libraries::VideoOut::BufferAttribute& attribute, VAddr a
 namespace {
 
 using WindowHandleFunction = void* (*)();
+
+// Frame limiter (ORBIS_RENDER_FPS_CAP=30|60|0). The title animates and fires its
+// sound events per rendered frame, so an unlocked presenter at 120-170 fps makes
+// it skip events such as footsteps; pacing the flips like a 60 Hz display restores
+// the cadence. Sleeps to within 2 ms with a 1 ms timer resolution, then yields.
+u32 FrameCap() {
+    static const u32 cap = [] {
+        const char* v = std::getenv("ORBIS_RENDER_FPS_CAP");
+        if (v == nullptr || *v == '\0') {
+            return 60u;
+        }
+        if (_stricmp(v, "max") == 0 || _stricmp(v, "unlocked") == 0 || _stricmp(v, "off") == 0) {
+            return 0u;
+        }
+        const long value = std::strtol(v, nullptr, 10);
+        return value > 0 ? static_cast<u32>(std::clamp<long>(value, 10, 1000)) : 0u;
+    }();
+    return cap;
+}
+
+void PreciseSleepUntil(std::chrono::steady_clock::time_point slot) {
+    using Period = UINT(WINAPI*)(UINT);
+    static const bool timer_resolution = [] {
+        const HMODULE winmm = LoadLibraryW(L"winmm.dll");
+        const auto begin_period = winmm != nullptr ? reinterpret_cast<Period>(GetProcAddress(winmm, "timeBeginPeriod")) : nullptr;
+        return begin_period != nullptr && begin_period(1) == 0;
+    }();
+    (void)timer_resolution;
+    for (;;) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= slot) {
+            return;
+        }
+        const auto remaining = std::chrono::duration_cast<std::chrono::microseconds>(slot - now);
+        if (remaining > std::chrono::milliseconds(2)) {
+            Sleep(static_cast<DWORD>(remaining.count() / 1000 - 1));
+        } else {
+            SwitchToThread();
+        }
+    }
+}
+
+void PaceFlip(u64 flips) {
+    const u32 cap = FrameCap();
+    if (cap == 0) {
+        return;
+    }
+    static std::chrono::steady_clock::time_point next_flip{};
+    static u64 resyncs = 0;
+    const auto period = std::chrono::nanoseconds(1'000'000'000ull / cap);
+    const auto now = std::chrono::steady_clock::now();
+    if (next_flip.time_since_epoch().count() == 0 || now > next_flip + period) {
+        if (next_flip.time_since_epoch().count() != 0) {
+            ++resyncs;
+        }
+        next_flip = now + period;
+        if (flips == 1) {
+            LOG_INFO(Render_Vulkan, "frame limiter: {} fps ({} us per flip)", cap, period.count() / 1000);
+        }
+        return;
+    }
+    PreciseSleepUntil(next_flip);
+    next_flip += period;
+    if (flips % 6000 == 0) {
+        LOG_INFO(Render_Vulkan, "frame limiter: {} fps, {} resyncs after {} flips", cap, resyncs, flips);
+    }
+}
 
 HWND VideoOutWindow() {
     if (std::getenv("ORBIS_GNM_READBACK") != nullptr) {
@@ -251,10 +327,29 @@ bool PresentFlip(const Libraries::VideoOut::BufferAttribute& attribute, VAddr ad
                 swapchain.Recreate(window_width, window_height);
             }
         }
+        PaceFlip(r.flips + 1);
         if (++r.flips == 1 || r.flips % 600 == 0) {
             LOG_INFO(Render_Vulkan, "flip #{} presented: {}x{} {} viewed as {} from image {:#x} into the {}x{} {} swapchain", r.flips, width,
                      height, vk::to_string(image.info.pixel_format), vk::to_string(view_info.format), address, extent.width, extent.height,
                      vk::to_string(swapchain.GetSurfaceFormat().format));
+        }
+        static const std::vector<u64> trace_flips = [] {
+            std::vector<u64> flips;
+            const char* v = std::getenv("ORBIS_GNM_TRACE_DRAWS_AT");
+            while (v != nullptr && *v != '\0') {
+                char* end = nullptr;
+                const u64 value = std::strtoull(v, &end, 10);
+                if (end == v) break;
+                flips.push_back(value);
+                v = *end == ',' ? end + 1 : end;
+            }
+            return flips;
+        }();
+        for (const u64 flip : trace_flips) {
+            if (r.flips == flip) {
+                anyps4_trace_draws.store(1500);
+                LOG_INFO(Render_Vulkan, "tracing the next 1500 draws after flip #{}", r.flips);
+            }
         }
         static const u64 dump_flip = [] { const char* v = std::getenv("ORBIS_GNM_DUMP_FRAME"); return v != nullptr ? std::strtoull(v, nullptr, 10) : 0; }();
         static const u64 dump_every = [] { const char* v = std::getenv("ORBIS_GNM_DUMP_EVERY"); return v != nullptr ? std::strtoull(v, nullptr, 10) : 0; }();

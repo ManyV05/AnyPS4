@@ -36,6 +36,7 @@ constexpr int kIdMainLabel = 116;
 constexpr int kIdFloorLabel = 117;
 constexpr int kIdLog = 118;
 constexpr int kIdDiagnostics = 119;
+constexpr int kIdFps = 120;
 constexpr int kIdKeyBase = 200;
 constexpr UINT kMessageLogLine = WM_APP + 1;
 constexpr UINT kMessageInstallDone = WM_APP + 2;
@@ -117,6 +118,8 @@ void ReadControlsIntoSettings() {
     g_settings.headless = SendMessageW(Control(kIdHeadless), BM_GETCHECK, 0, 0) == BST_CHECKED;
     g_settings.diagnostics = SendMessageW(Control(kIdDiagnostics), BM_GETCHECK, 0, 0) == BST_CHECKED;
     g_settings.presentMode = WindowText(Control(kIdPresent));
+    const int fpsChoice = static_cast<int>(SendMessageW(Control(kIdFps), CB_GETCURSEL, 0, 0));
+    g_settings.fpsCap = fpsChoice == 0 ? 30 : fpsChoice == 2 ? 0 : 60;
     g_settings.bgmVolume = static_cast<int>(SendMessageW(Control(kIdBgm), TBM_GETPOS, 0, 0));
     g_settings.mainVolume = static_cast<int>(SendMessageW(Control(kIdMain), TBM_GETPOS, 0, 0));
     g_settings.musicFloor = static_cast<int>(SendMessageW(Control(kIdFloor), TBM_GETPOS, 0, 0));
@@ -152,6 +155,7 @@ void Play() {
     std::vector<std::pair<std::wstring, std::wstring>> environment;
     environment.emplace_back(L"APS5_NO_WRITE_WATCH", g_settings.writeWatch ? L"" : L"1");
     environment.emplace_back(L"ORBIS_GNM_PRESENT_MODE", g_settings.presentMode);
+    environment.emplace_back(L"ORBIS_RENDER_FPS_CAP", std::to_wstring(g_settings.fpsCap));
     environment.emplace_back(L"ORBIS_GNM_VALIDATION", g_settings.validation ? L"1" : L"");
     environment.emplace_back(L"ORBIS_GNM_NO_PIPELINE_CACHE", g_settings.pipelineCache ? L"" : L"1");
     environment.emplace_back(L"ORBIS_GNM_HEADLESS", g_settings.headless ? L"1" : L"");
@@ -175,7 +179,8 @@ void Play() {
     const std::wstring logFile = (logDirectory / (std::wstring(L"session-") + stamp + L".log")).wstring();
     std::wstring error;
     if (launcher::StartDetached(executable, g_settings.installDirectory, environment, logFile, error)) {
-        AppendLog(L"Started " + executable + L" (present " + g_settings.presentMode + L", BGM " + std::to_wstring(g_settings.bgmVolume) + L" %, voices " +
+        AppendLog(L"Started " + executable + L" (present " + g_settings.presentMode + L", frame limit " +
+                  (g_settings.fpsCap == 0 ? std::wstring(L"off") : std::to_wstring(g_settings.fpsCap) + L" fps") + L", BGM " + std::to_wstring(g_settings.bgmVolume) + L" %, voices " +
                   std::to_wstring(g_settings.mainVolume) + L" %" + (g_settings.diagnostics ? L", diagnostics on" : L"") + L"); log " + logFile);
     } else {
         AppendLog(L"Could not start the title: " + error);
@@ -246,22 +251,26 @@ void CreateControls() {
     Create(L"BUTTON", L"Use an XInput gamepad (slot 1) when connected", BS_AUTOCHECKBOX, 24, 402, 400, 24, kIdXInput);
     SendMessageW(Control(kIdXInput), BM_SETCHECK, g_settings.xinput ? BST_CHECKED : BST_UNCHECKED, 0);
 
-    Create(L"BUTTON", L"Render and audio", BS_GROUPBOX, 555, 112, 240, 330, 0);
+    Create(L"BUTTON", L"Render and audio", BS_GROUPBOX, 555, 112, 240, 360, 0);
     Create(L"STATIC", L"Present mode:", 0, 567, 140, 100, 20, 0);
     HWND present = Create(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL, 667, 136, 115, 120, kIdPresent);
     for (const wchar_t* mode : {L"Fifo", L"Mailbox", L"Immediate"}) SendMessageW(present, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(mode));
     SendMessageW(present, CB_SELECTSTRING, static_cast<WPARAM>(-1), reinterpret_cast<LPARAM>(g_settings.presentMode.c_str()));
-    Create(L"BUTTON", L"Persistent pipeline cache", BS_AUTOCHECKBOX, 567, 170, 220, 24, kIdPipelineCache);
+    Create(L"STATIC", L"Frame limit:", 0, 567, 170, 100, 20, 0);
+    HWND fps = Create(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL, 667, 166, 115, 120, kIdFps);
+    for (const wchar_t* choice : {L"30 fps", L"60 fps", L"Unlimited"}) SendMessageW(fps, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(choice));
+    SendMessageW(fps, CB_SETCURSEL, g_settings.fpsCap == 30 ? 0 : g_settings.fpsCap == 0 ? 2 : 1, 0);
+    Create(L"BUTTON", L"Persistent pipeline cache", BS_AUTOCHECKBOX, 567, 200, 220, 24, kIdPipelineCache);
     SendMessageW(Control(kIdPipelineCache), BM_SETCHECK, g_settings.pipelineCache ? BST_CHECKED : BST_UNCHECKED, 0);
-    Create(L"BUTTON", L"Vulkan validation layer", BS_AUTOCHECKBOX, 567, 196, 220, 24, kIdValidation);
+    Create(L"BUTTON", L"Vulkan validation layer", BS_AUTOCHECKBOX, 567, 226, 220, 24, kIdValidation);
     SendMessageW(Control(kIdValidation), BM_SETCHECK, g_settings.validation ? BST_CHECKED : BST_UNCHECKED, 0);
-    Create(L"BUTTON", L"Headless (no rendering)", BS_AUTOCHECKBOX, 567, 222, 220, 24, kIdHeadless);
+    Create(L"BUTTON", L"Headless (no rendering)", BS_AUTOCHECKBOX, 567, 252, 220, 24, kIdHeadless);
     SendMessageW(Control(kIdHeadless), BM_SETCHECK, g_settings.headless ? BST_CHECKED : BST_UNCHECKED, 0);
-    Create(L"BUTTON", L"Diagnostics (trace, frame dumps)", BS_AUTOCHECKBOX, 567, 420, 220, 24, kIdDiagnostics);
+    Create(L"BUTTON", L"Diagnostics (trace, frame dumps)", BS_AUTOCHECKBOX, 567, 446, 220, 24, kIdDiagnostics);
     SendMessageW(Control(kIdDiagnostics), BM_SETCHECK, g_settings.diagnostics ? BST_CHECKED : BST_UNCHECKED, 0);
     const int sliders[3][3] = {{kIdBgm, kIdBgmLabel, g_settings.bgmVolume}, {kIdMain, kIdMainLabel, g_settings.mainVolume}, {kIdFloor, kIdFloorLabel, g_settings.musicFloor}};
     for (int k = 0; k < 3; ++k) {
-        const int y = 258 + k * 58;
+        const int y = 284 + k * 54;
         Create(L"STATIC", L"", 0, 567, y, 220, 20, sliders[k][1]);
         HWND bar = Create(TRACKBAR_CLASSW, L"", TBS_HORZ | TBS_AUTOTICKS, 567, y + 20, 220, 30, sliders[k][0]);
         SendMessageW(bar, TBM_SETRANGE, TRUE, MAKELPARAM(0, 150));
@@ -269,7 +278,7 @@ void CreateControls() {
         SendMessageW(bar, TBM_SETPOS, TRUE, sliders[k][2]);
     }
     UpdateSliderLabels();
-    g_log = Create(L"EDIT", L"", WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL, 12, 452, 783, 200, kIdLog);
+    g_log = Create(L"EDIT", L"", WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL, 12, 482, 783, 200, kIdLog);
     AppendLog(L"AnyPS4 launcher. Settings: " + launcher::SettingsPath());
     AppendLog(L"Repository " + g_settings.repoRoot + L", build directory " + g_settings.buildDirectory +
               (g_settings.shadps4Checkout.empty() ? L" (no shadPS4 checkout configured: functions keep NID names)" : L", shadPS4 " + g_settings.shadps4Checkout));
@@ -329,6 +338,7 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
         case kIdHeadless:
         case kIdDiagnostics:
         case kIdPresent:
+        case kIdFps:
             ReadControlsIntoSettings();
             launcher::SaveSettings(g_settings);
             launcher::SavePadConfiguration(g_settings);
@@ -404,7 +414,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
     windowClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
     windowClass.lpszClassName = L"AnyPS4Launcher";
     RegisterClassW(&windowClass);
-    RECT frame{0, 0, 808, 664};
+    RECT frame{0, 0, 808, 694};
     AdjustWindowRect(&frame, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, FALSE);
     g_window = CreateWindowExW(0, windowClass.lpszClassName, L"AnyPS4 Launcher", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, CW_USEDEFAULT,
                                CW_USEDEFAULT, frame.right - frame.left, frame.bottom - frame.top, nullptr, nullptr, instance, nullptr);

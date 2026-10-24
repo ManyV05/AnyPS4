@@ -17,6 +17,7 @@ struct Settings {
     std::wstring python = L"python";
     std::wstring cmake = L"cmake";
     std::wstring presentMode = L"Fifo";
+    int fpsCap = 60;
     bool validation = false;
     bool pipelineCache = true;
     bool headless = false;

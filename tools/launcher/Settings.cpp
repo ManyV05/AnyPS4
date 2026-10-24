@@ -77,6 +77,7 @@ Settings LoadSettings() {
     settings.python = ReadString(file, L"python", L"python");
     settings.cmake = ReadString(file, L"cmake", L"cmake");
     settings.presentMode = ReadString(file, L"present", L"Fifo");
+    settings.fpsCap = ReadInt(file, L"fps_cap", 60);
     settings.validation = ReadInt(file, L"validation", 0) != 0;
     settings.pipelineCache = ReadInt(file, L"pipeline_cache", 1) != 0;
     settings.headless = ReadInt(file, L"headless", 0) != 0;
@@ -109,6 +110,7 @@ void SaveSettings(const Settings& settings) {
     WriteString(file, L"python", settings.python);
     WriteString(file, L"cmake", settings.cmake);
     WriteString(file, L"present", settings.presentMode);
+    WriteInt(file, L"fps_cap", settings.fpsCap);
     WriteInt(file, L"validation", settings.validation ? 1 : 0);
     WriteInt(file, L"pipeline_cache", settings.pipelineCache ? 1 : 0);
     WriteInt(file, L"headless", settings.headless ? 1 : 0);

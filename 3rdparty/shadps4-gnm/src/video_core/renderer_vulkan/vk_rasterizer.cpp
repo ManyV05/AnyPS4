@@ -1,6 +1,10 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <atomic>
+#include <cstdlib>
+#include <cstring>
+#include <vector>
 #include "common/debug.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
@@ -18,6 +22,8 @@
 #ifdef MemoryBarrier
 #undef MemoryBarrier
 #endif
+
+std::atomic<int>& AnyPs4TraceDraws();
 
 namespace Vulkan {
 
@@ -205,7 +211,68 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     if (!BindResources(pipeline)) {
         return;
     }
+    static const std::vector<u64> skipped_shaders = [] {
+        std::vector<u64> hashes;
+        const char* v = std::getenv("ORBIS_GNM_SKIP_PS");
+        while (v != nullptr && *v != '\0') {
+            char* end = nullptr;
+            const u64 value = std::strtoull(v, &end, 16);
+            if (end == v) break;
+            hashes.push_back(value);
+            v = *end == ',' ? end + 1 : end;
+        }
+        return hashes;
+    }();
+    if (!skipped_shaders.empty()) {
+        const u64 ps_hash = pipeline->GetGraphicsKey().stage_hashes[static_cast<u32>(Shader::LogicalStage::Fragment)];
+        for (const u64 hash : skipped_shaders) {
+            if (hash == ps_hash) {
+                ResetBindings();
+                return;
+            }
+        }
+    }
+    static const u64 trace_on_ps = [] {
+        const char* v = std::getenv("ORBIS_GNM_TRACE_ON_PS");
+        return v != nullptr ? std::strtoull(v, nullptr, 16) : 0ull;
+    }();
+    static bool scene_trace_armed = false;
+    if (trace_on_ps != 0 && !scene_trace_armed && regs.num_indices == 6 &&
+        pipeline->GetGraphicsKey().stage_hashes[static_cast<u32>(Shader::LogicalStage::Fragment)] == trace_on_ps) {
+        scene_trace_armed = true;
+        AnyPs4TraceDraws().store(1200);
+        LOG_INFO(Render_Vulkan, "scene trace armed by pixel shader {:#x}: tracing the next 1200 draws", trace_on_ps);
+    }
+
     const auto state = BeginRendering(pipeline);
+
+    if (AnyPs4TraceDraws().load(std::memory_order_relaxed) > 0) {
+        AnyPs4TraceDraws().fetch_sub(1);
+        const auto& key = pipeline->GetGraphicsKey();
+        std::string cbs;
+        for (u32 i = 0; i < key.num_color_attachments && i < AmdGpu::NUM_COLOR_BUFFERS; ++i) {
+            const auto& cb = regs.color_buffers[i];
+            const auto& bc = regs.blend_control[i];
+            cbs += fmt::format("cb{}[{:#x} {}x{} df{} nf{} blend {} {}/{}/{} mask {:#x}] ", i, cb.Address(), cb.Pitch(),
+                               cb.Height(), static_cast<u32>(cb.GetDataFmt()), static_cast<u32>(cb.GetNumberFmt()),
+                               static_cast<u32>(bc.enable), static_cast<u32>(bc.color_src_factor),
+                               static_cast<u32>(bc.color_dst_factor), static_cast<u32>(bc.color_func),
+                               static_cast<u32>(key.write_masks[i]));
+        }
+        LOG_INFO(Render_Vulkan,
+                 "draw: {} idx x{} vs {:#x} ps {:#x} depth {}{} func {} z {:#x} zvalid {}{} zfmt {} drc {}{} zw {:#x} ovr {}{} cbmode {} vp {:.0f}x{:.0f} zr {:.3f}+{:.3f} {}",
+                 regs.num_indices, regs.num_instances.NumInstances(),
+                 key.stage_hashes[static_cast<u32>(Shader::LogicalStage::Vertex)],
+                 key.stage_hashes[static_cast<u32>(Shader::LogicalStage::Fragment)],
+                 static_cast<u32>(regs.depth_control.depth_enable), static_cast<u32>(regs.depth_control.depth_write_enable),
+                 static_cast<u32>(regs.depth_control.depth_func), regs.depth_buffer.DepthAddress(),
+                 static_cast<u32>(regs.depth_buffer.DepthValid()), static_cast<u32>(regs.depth_buffer.DepthWriteValid()),
+                 static_cast<u32>(regs.depth_buffer.z_info.format), static_cast<u32>(regs.depth_render_control.depth_clear_enable),
+                 static_cast<u32>(regs.depth_render_control.depth_copy), regs.depth_buffer.DepthWriteAddress(),
+                 static_cast<u32>(regs.depth_render_override.force_z_dirty), static_cast<u32>(regs.depth_render_override.force_z_valid),
+                 static_cast<u32>(regs.color_control.mode), std::fabs(regs.viewports[0].xscale) * 2.0f,
+                 std::fabs(regs.viewports[0].yscale) * 2.0f, regs.viewports[0].zscale, regs.viewports[0].zoffset, cbs);
+    }
 
     buffer_cache.BindVertexBuffers(*pipeline, buffer_barriers);
     if (is_indexed) {
@@ -329,6 +396,9 @@ void Rasterizer::DispatchDirect() {
 
     const auto& cs = pipeline->GetStage(Shader::LogicalStage::Compute);
     if (ExecuteShaderHLE(cs, liverpool->regs, cs_program, *this)) {
+        if (AnyPs4TraceDraws().load(std::memory_order_relaxed) > 0) {
+            LOG_INFO(Render_Vulkan, "dispatch handled by HLE cs {:#x}", cs_program.Address<VAddr>());
+        }
         return;
     }
 
@@ -341,6 +411,20 @@ void Rasterizer::DispatchDirect() {
 
     const auto cmdbuf = scheduler.CommandBuffer();
     cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline->Handle());
+    if (AnyPs4TraceDraws().load(std::memory_order_relaxed) > 0) {
+        AnyPs4TraceDraws().fetch_sub(1);
+        std::string bufs;
+        for (const auto& desc : cs.buffers) {
+            const auto sharp = desc.GetSharp(cs);
+            bufs += fmt::format(" {}{:#x}+{:#x}", desc.is_written ? "w" : "r", sharp.base_address, sharp.GetSize());
+        }
+        for (const auto& desc : cs.images) {
+            const auto sharp = desc.GetSharp(cs);
+            bufs += fmt::format(" {}img{:#x}", desc.is_written ? "w" : "r", sharp.Address());
+        }
+        LOG_INFO(Render_Vulkan, "dispatch: {}x{}x{} cs {:#x}{}", cs_program.dim_x, cs_program.dim_y, cs_program.dim_z,
+                 cs_program.Address<VAddr>(), bufs);
+    }
     cmdbuf.dispatch(cs_program.dim_x, cs_program.dim_y, cs_program.dim_z);
     DebugState.IncDispatch();
 
@@ -402,8 +486,22 @@ void Rasterizer::OnSubmit() {
 }
 
 bool Rasterizer::BindResources(const Pipeline* pipeline) {
-    if (IsComputeImageCopy(pipeline) || IsComputeMetaClear(pipeline) ||
-        IsComputeImageClear(pipeline)) {
+    const bool trace_skips = pipeline->IsCompute() && AnyPs4TraceDraws().load(std::memory_order_relaxed) > 0;
+    const bool skip_copy = IsComputeImageCopy(pipeline);
+    const bool skip_meta = !skip_copy && IsComputeMetaClear(pipeline);
+    const bool skip_clear = !skip_copy && !skip_meta && IsComputeImageClear(pipeline);
+    if (skip_copy || skip_meta || skip_clear) {
+        if (trace_skips) {
+            const auto& info = pipeline->GetStage(Shader::LogicalStage::Compute);
+            std::string bufs;
+            for (const auto& desc : info.buffers) {
+                const auto sharp = desc.GetSharp(info);
+                bufs += fmt::format(" {}{:#x}+{:#x}", desc.is_written ? "w" : "r", sharp.base_address, sharp.GetSize());
+            }
+            LOG_INFO(Render_Vulkan, "dispatch skipped as {} cs {:#x} xor {} bufs{}",
+                     skip_copy ? "image copy" : skip_meta ? "meta clear" : "image clear",
+                     liverpool->GetCsRegs().Address<VAddr>(), info.has_bitwise_xor, bufs);
+        }
         return false;
     }
 
@@ -442,6 +540,48 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     return true;
 }
 
+// AnyPS4: a shader that fills HTILE with the "expanded" encoding (ZMASK 0xF, every
+// tile uncompressed) tells the DB to trust the depth surface as it is; shadPS4 treats
+// every HTILE fill as a clear and wipes the depth image to DB_DEPTH_CLEAR at the next
+// bind, losing what the title rendered into that surface. The fill value is the single
+// 16-byte constant such shaders read, so it can be inspected before the dispatch is
+// dropped. ORBIS_GNM_HTILE_EXPAND=0 restores the unconditional clear.
+static bool HtileFillIsExpand(const Shader::Info& info) {
+    static const bool enabled = [] {
+        const char* v = std::getenv("ORBIS_GNM_HTILE_EXPAND");
+        return v == nullptr || *v != '0';
+    }();
+    if (!enabled) {
+        return false;
+    }
+    const Shader::BufferResource* constant = nullptr;
+    for (const auto& desc : info.buffers) {
+        if (desc.IsSpecial() || desc.is_written) {
+            continue;
+        }
+        if (constant != nullptr) {
+            return false;
+        }
+        constant = &desc;
+    }
+    if (constant == nullptr) {
+        return false;
+    }
+    const auto sharp = constant->GetSharp(info);
+    if (sharp.GetSize() != 16 || sharp.base_address == 0) {
+        return false;
+    }
+    u32 value = 0;
+    std::memcpy(&value, reinterpret_cast<const void*>(sharp.base_address), sizeof(value));
+    static u32 last_logged = 0xdeadbeef;
+    const bool expand = (value & 0xFu) == 0xFu;
+    if (value != last_logged) {
+        last_logged = value;
+        LOG_INFO(Render_Vulkan, "HTILE fill value {:#010x}: {}", value, expand ? "expand (surface kept)" : "clear");
+    }
+    return expand;
+}
+
 bool Rasterizer::IsComputeMetaClear(const Pipeline* pipeline) {
     if (!pipeline->IsCompute()) {
         return false;
@@ -469,7 +609,18 @@ bool Rasterizer::IsComputeMetaClear(const Pipeline* pipeline) {
         // Assume if a shader writes metadata without address calculation, it is a clear shader.
         for (const auto& desc : info.buffers) {
             const VAddr address = desc.GetSharp(info).base_address;
-            if (!desc.IsSpecial() && desc.is_written && texture_cache.ClearMeta(address)) {
+            if (desc.IsSpecial() || !desc.is_written) {
+                continue;
+            }
+            const auto meta_type = texture_cache.IsMeta(address);
+            if (!meta_type) {
+                continue;
+            }
+            if (*meta_type == VideoCore::TextureCache::MetaType::HTile && HtileFillIsExpand(info)) {
+                LOG_TRACE(Render_Vulkan, "HTILE expand skipped");
+                return true;
+            }
+            if (texture_cache.ClearMeta(address)) {
                 // Assume all slices were updates
                 LOG_TRACE(Render_Vulkan, "Metadata update skipped");
                 return true;
@@ -754,6 +905,11 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
 
             image_id = texture_cache.FindImage(desc);
             auto* image = &texture_cache.GetImage(image_id);
+            if (AnyPs4TraceDraws().load(std::memory_order_relaxed) > 0) {
+                LOG_INFO(Render_Vulkan, "  tex {:#x} {}x{} {} flags {:#x} sharp {}x{} df{}", image->info.guest_address,
+                         image->info.size.width, image->info.size.height, vk::to_string(image->info.pixel_format),
+                         static_cast<u32>(image->flags), tsharp.width, tsharp.height, static_cast<u32>(data_fmt));
+            }
             if (auto depth_image_id = texture_cache.GetAssociatedDepth(*image)) {
                 // If this image has an associated depth image, it's a stencil attachment.
                 // Redirect the access to the actual depth-stencil buffer.
@@ -934,10 +1090,15 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
         auto& image = texture_cache.GetImage(image_id);
 
         const auto slice = image_view.info.range.base.layer;
+        static const bool meta_depth_clear = std::getenv("ORBIS_GNM_NO_META_DEPTH_CLEAR") == nullptr;
+        const bool meta_cleared = texture_cache.IsMetaCleared(htile_address, slice);
         const bool is_depth_clear =
             (regs.depth_render_control.depth_clear_enable && regs.depth_control.depth_enable &&
              regs.depth_control.depth_write_enable) ||
-            texture_cache.IsMetaCleared(htile_address, slice);
+            (meta_depth_clear && meta_cleared);
+        if (meta_cleared && !meta_depth_clear && AnyPs4TraceDraws().load(std::memory_order_relaxed) > 0) {
+            LOG_INFO(Render_Vulkan, "  depth clear of {:#x} skipped (htile {:#x} marked cleared)", regs.depth_buffer.DepthAddress(), htile_address);
+        }
         const bool is_stencil_clear = regs.depth_render_control.stencil_clear_enable;
         texture_cache.TouchMeta(htile_address, slice, false);
         ASSERT(desc.view_info.range.extent.levels == 1 && !image.binding.needs_rebind);
@@ -971,6 +1132,10 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
             attachment.clear_value[0] = is_depth_clear ? std::bit_cast<u32>(regs.depth_clear) : 0u;
             attachment.has_depth = true;
             attachment.depth_clear = is_depth_clear;
+            if (is_depth_clear && AnyPs4TraceDraws().load(std::memory_order_relaxed) > 0) {
+                LOG_INFO(Render_Vulkan, "  depth clear {:#x} to {} (register {}, htile {:#x})", regs.depth_buffer.DepthAddress(),
+                         regs.depth_clear, static_cast<u32>(regs.depth_render_control.depth_clear_enable), htile_address);
+            }
         }
         if (regs.depth_buffer.StencilValid()) {
             attachment.clear_value[1] = is_stencil_clear ? regs.stencil_clear : 0u;
@@ -1067,10 +1232,16 @@ void Rasterizer::DepthStencilCopy(bool is_depth, bool is_stencil) {
 }
 
 void Rasterizer::FillBuffer(VAddr address, u32 num_bytes, u32 value, bool is_gds) {
+    if (AnyPs4TraceDraws().load(std::memory_order_relaxed) > 0) {
+        LOG_INFO(Render_Vulkan, "  fill {:#x} {} bytes value {:#x} gds {}", address, num_bytes, value, is_gds);
+    }
     buffer_cache.FillBuffer(address, num_bytes, value, is_gds);
 }
 
 void Rasterizer::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, bool src_gds) {
+    if (AnyPs4TraceDraws().load(std::memory_order_relaxed) > 0) {
+        LOG_INFO(Render_Vulkan, "  copy {:#x} <- {:#x} {} bytes", dst, src, num_bytes);
+    }
     buffer_cache.CopyBuffer(dst, src, num_bytes, dst_gds, src_gds);
 }
 

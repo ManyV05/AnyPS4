@@ -349,6 +349,14 @@ ORBIS_SYSV_ABI s32 orbis_scePadReadState(s32 handle, PadData* data) {
     data->analogButtons.r2 = Down(Key(11)) ? 255 : 0;
     ReadXInput(data, buttons);
     LoadScript();
+    static const bool scriptOnly = std::getenv("ORBIS_PAD_SCRIPT_ONLY") != nullptr;
+    if (scriptOnly && !script.empty()) {
+        buttons = 0;
+        data->leftStick = {128, 128};
+        data->rightStick = {128, 128};
+        data->analogButtons.l2 = 0;
+        data->analogButtons.r2 = 0;
+    }
     const auto now = std::chrono::steady_clock::now();
     if (readCount++ == 0) firstRead = now;
     const auto elapsedMs = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(now - firstRead).count());

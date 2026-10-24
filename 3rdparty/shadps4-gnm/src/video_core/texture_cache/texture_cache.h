@@ -25,6 +25,11 @@ namespace AmdGpu {
 struct Liverpool;
 }
 
+#include <atomic>
+#include "common/logging/log.h"
+
+std::atomic<int>& AnyPs4TraceDraws();
+
 namespace VideoCore {
 
 class BufferCache;
@@ -195,6 +200,9 @@ public:
 
     /// Clears all slices of the specified metadata surface.
     bool ClearMeta(VAddr address) {
+        if (AnyPs4TraceDraws().load(std::memory_order_relaxed) > 0 && IsMeta(address)) {
+            LOG_INFO(Render_Vulkan, "  meta {:#x} marked cleared", address);
+        }
         auto it = surface_metas.find(address);
         if (it != surface_metas.end()) {
             it.value().clear_mask = u32(-1);

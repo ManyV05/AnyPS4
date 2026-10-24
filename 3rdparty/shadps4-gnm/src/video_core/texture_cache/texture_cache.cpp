@@ -4,6 +4,8 @@
 #include <filesystem>
 #include <half.hpp>
 #include <stb_image_write.h>
+#include <atomic>
+#include <string_view>
 #include <xxhash.h>
 
 #include "common/assert.h"
@@ -20,6 +22,8 @@
 #include "video_core/texture_cache/host_compatibility.h"
 #include "video_core/texture_cache/texture_cache.h"
 #include "video_core/texture_cache/tile_manager.h"
+
+std::atomic<int>& AnyPs4TraceDraws();
 
 namespace VideoCore {
 
@@ -137,6 +141,11 @@ void TextureCache::InvalidateMemory(VAddr addr, size_t size) {
         if (image.Overlaps(addr, size)) {
             // Modified region overlaps image, so the image was definitely accessed by this fault.
             // Untrack the image, so that the range is unprotected and the guest can write freely.
+            if (AnyPs4TraceDraws().load(std::memory_order_relaxed) > 0) {
+                LOG_INFO(Render, "  cpu write {:#x} hits image {:#x} {}x{} {} flags {:#x}", addr, image.info.guest_address,
+                         image.info.size.width, image.info.size.height, vk::to_string(image.info.pixel_format),
+                         static_cast<u32>(image.flags));
+            }
             image.flags |= ImageFlagBits::CpuDirty;
             UntrackImage(image_id);
         } else if (pages_end < image_end) {
@@ -194,7 +203,7 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
         requested_info.props.has_stencil == cache_image.info.props.has_stencil;
     const bool bpp_match = requested_info.num_bits == cache_image.info.num_bits;
 
-    LOG_DEBUG(Render_Vulkan,
+    LOG_INFO(Render_Vulkan,
              "Depth overlap: addr={:#x} binding={} req(fmt={}, depth={}, bits={}) cache(fmt={}, "
              "depth={}, bits={})",
              cache_image.info.guest_address, static_cast<u32>(binding),
@@ -742,6 +751,16 @@ void TextureCache::RefreshImage(Image& image) {
     const u32 num_mips = image.info.resources.levels;
     const bool is_gpu_modified = True(image.flags & ImageFlagBits::GpuModified);
     const bool is_gpu_dirty = True(image.flags & ImageFlagBits::GpuDirty);
+    // AnyPS4 diagnostics: ORBIS_GNM_TEXTURE_UPLOAD=never keeps GPU-written images from
+    // ever being re-uploaded from guest memory; =always disables the hash guard.
+    static const int upload_mode = [] {
+        const char* v = std::getenv("ORBIS_GNM_TEXTURE_UPLOAD");
+        return v == nullptr ? 0 : std::string_view{v} == "never" ? 1 : std::string_view{v} == "always" ? 2 : 0;
+    }();
+    if (upload_mode == 1 && is_gpu_modified && !is_gpu_dirty) {
+        image.flags &= ~ImageFlagBits::Dirty;
+        return;
+    }
 
     boost::container::small_vector<vk::BufferImageCopy, 14> image_copies;
     for (u32 m = 0; m < num_mips; m++) {
@@ -752,7 +771,7 @@ void TextureCache::RefreshImage(Image& image) {
         const auto [mip_size, mip_pitch, mip_height, mip_offset] = image.info.mips_layout[m];
 
         // Protect GPU modified resources from accidental CPU reuploads.
-        if (is_gpu_modified && !is_gpu_dirty) {
+        if (is_gpu_modified && !is_gpu_dirty && upload_mode != 2) {
             const u8* addr = std::bit_cast<u8*>(image.info.guest_address);
             const u64 hash = XXH3_64bits(addr + mip_offset, mip_size);
             if (image.mip_hashes[m] == hash) {

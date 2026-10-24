@@ -30,7 +30,7 @@ struct EmulatorSettingsImpl {
     bool IsVkCrashDiagnosticEnabled() const { return false; }
     bool IsReadbackLinearImagesEnabled() const { return false; }
     bool IsRcasEnabled() const { return false; }
-    bool IsPatchShaders() const { return true; }
+    bool IsPatchShaders() const { return false; }
     bool IsFsrEnabled() const { return false; }
     GpuReadbacksMode GetReadbacksMode() const { return GpuReadbacksMode::Disabled; }
     std::string GetPresentMode() const {
