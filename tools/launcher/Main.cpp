@@ -3,6 +3,7 @@
 #include <shlobj.h>
 #include <shobjidl.h>
 #include <shellapi.h>
+#include <cwctype>
 #include <filesystem>
 #include <string>
 #include <thread>
@@ -131,14 +132,29 @@ void UpdateSliderLabels() {
     SetWindowTextW(Control(kIdFloorLabel), (L"Music floor when the title mutes it: " + std::to_wstring(SendMessageW(Control(kIdFloor), TBM_GETPOS, 0, 0)) + L" %").c_str());
 }
 
+bool IsTitleExecutable(const std::filesystem::path& path) {
+    std::wstring name = path.filename().wstring();
+    for (wchar_t& c : name) c = static_cast<wchar_t>(towlower(c));
+    return path.extension() == L".exe" && name.rfind(L"anyps4_launcher", 0) != 0 && name.find(L"_dbg") == std::wstring::npos;
+}
+
 std::wstring FindExecutable() {
-    if (!g_settings.executable.empty() && std::filesystem::exists(g_settings.executable)) return g_settings.executable;
+    if (!g_settings.executable.empty() && std::filesystem::exists(g_settings.executable) && IsTitleExecutable(g_settings.executable)) return g_settings.executable;
     std::error_code error;
+    std::filesystem::path newest;
+    std::filesystem::file_time_type newestTime{};
     for (const auto& entry : std::filesystem::directory_iterator(g_settings.installDirectory, error)) {
-        const std::wstring name = entry.path().filename().wstring();
-        if (entry.is_regular_file(error) && entry.path().extension() == L".exe" && name.find(L"_dbg") == std::wstring::npos) return entry.path().wstring();
+        if (!entry.is_regular_file(error) || !IsTitleExecutable(entry.path())) continue;
+        std::filesystem::path registry = entry.path();
+        registry.replace_extension(L".registry.json");
+        if (std::filesystem::exists(registry, error)) return entry.path().wstring();
+        const auto time = entry.last_write_time(error);
+        if (newest.empty() || time > newestTime) {
+            newest = entry.path();
+            newestTime = time;
+        }
     }
-    return {};
+    return newest.wstring();
 }
 
 void Play() {
