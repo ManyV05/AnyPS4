@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -87,26 +88,56 @@ static const char* acb_task_name[] = NAME_ARRAY(ACB_TASK, MAX_NAMES);
 
 std::array<u8, 48_KB> Liverpool::ConstantEngine::constants_heap;
 
-// AnyPS4: forcing a CPU-written fence is a last resort for a real CPU<->GPU
-// deadlock. The spin counts the fork tuned (100k gfx, 500k asc) elapse in a few
-// milliseconds here, well inside a normal CPU frame, so the CP ran ahead of the
-// title's writes (torn vertex and texture data: flicker, black lines, garbage
-// particles). The spin threshold now only arms a wall-clock timeout
-// (ORBIS_GNM_FENCE_TIMEOUT_MS, 1000 by default), the way the hardware simply
-// waits.
-static bool FenceWaitExpired(std::chrono::steady_clock::time_point start) {
-    static const auto timeout = [] {
-        const char* v = std::getenv("ORBIS_GNM_FENCE_TIMEOUT_MS");
-        const long ms = v != nullptr ? std::strtol(v, nullptr, 10) : 1000;
-        return std::chrono::milliseconds(ms > 0 ? ms : 1000);
-    }();
-    return std::chrono::steady_clock::now() - start >= timeout;
+// AnyPS4: forcing a CPU-written fence is a last resort. The spin counts the
+// fork tuned (100k gfx, 500k asc) elapse in a few milliseconds here, inside a
+// normal CPU frame, so the CP ran ahead of the title's writes (torn vertex and
+// texture data: flicker, black lines, garbage particles). A fixed wall-clock
+// timeout is no better: in scene transitions (New Game) the title's CPU waits
+// for the GPU while the CP waits for the fence, every wait expires, and a
+// 1000 ms limit ran the title at one frame per second. The spin threshold
+// therefore arms an adaptive limit: it halves after every forced fence, down to
+// ORBIS_GNM_FENCE_TIMEOUT_MIN_MS (8), so a circular wait costs milliseconds per
+// frame, and it follows four times the longest fence the CPU delivered on its
+// own, up to ORBIS_GNM_FENCE_TIMEOUT_MS (1000), so in play the CP waits the way
+// the hardware does.
+static double FenceWaitMs(std::chrono::steady_clock::time_point start) {
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
 }
 
-static long FenceWaitMs(std::chrono::steady_clock::time_point start) {
-    return static_cast<long>(
-        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count());
-}
+struct FenceWatchdog {
+    double floor_ms;
+    double ceiling_ms;
+    double limit_ms;
+    u64 forced = 0;
+    u64 satisfied = 0;
+
+    FenceWatchdog() {
+        const char* min = std::getenv("ORBIS_GNM_FENCE_TIMEOUT_MIN_MS");
+        const char* max = std::getenv("ORBIS_GNM_FENCE_TIMEOUT_MS");
+        floor_ms = min != nullptr && std::strtod(min, nullptr) > 0 ? std::strtod(min, nullptr) : 8.0;
+        ceiling_ms = max != nullptr && std::strtod(max, nullptr) > 0 ? std::strtod(max, nullptr) : 1000.0;
+        ceiling_ms = std::max(ceiling_ms, floor_ms);
+        limit_ms = floor_ms;
+    }
+
+    bool Expired(std::chrono::steady_clock::time_point start) const {
+        return FenceWaitMs(start) >= limit_ms;
+    }
+
+    void Forced() {
+        ++forced;
+        limit_ms = std::max(floor_ms, limit_ms * 0.5);
+    }
+
+    void Satisfied(double wait_ms) {
+        ++satisfied;
+        const double target = std::clamp(wait_ms * 4.0, floor_ms, ceiling_ms);
+        limit_ms = target > limit_ms ? target : limit_ms * 0.98 + target * 0.02;
+    }
+};
+
+static FenceWatchdog gfx_fence_watchdog;
+static FenceWatchdog asc_fence_watchdog;
 
 static std::span<const u32> NextPacket(std::span<const u32> span, size_t offset) {
     if (offset > span.size()) {
@@ -886,6 +917,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     break;
                 }
                 u64 wrm_spins = 0;
+                bool wrm_forced = false;
                 const auto wrm_start = std::chrono::steady_clock::now();
                 while (!wait_reg_mem->Test(regs.reg_array)) {
                     ++wrm_spins;
@@ -897,7 +929,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                         // guest may take the lock again (SubmitDone) while we are parked.
                         Platform::IrqC::Instance()->Signal(Platform::InterruptId::GpuIdle);
                     }
-                    if (wrm_spins >= 100'000 && wrm_spins % 4'096 == 0 && FenceWaitExpired(wrm_start)) {
+                    if (wrm_spins >= 100'000 && wrm_spins % 4'096 == 0 && gfx_fence_watchdog.Expired(wrm_start)) {
                         // Watchdog: the fence value never arrived (CPU<->GPU deadlock).
                         // Force the expected value and continue so the pipeline unjams.
                         const bool is_mem = wait_reg_mem->mem_space.Value() ==
@@ -907,8 +939,8 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                         static u64 forced_fences = 0;
                         if (forced_fences++ % 100 == 0)
                         LOG_ERROR(Render_Vulkan,
-                                  "Gfx WaitRegMem timeout (#{}, {} ms): mem_space={} addr/reg={:#x} func={} "
-                                  "ref={:#x} current={:#x} — forcing fence", forced_fences, FenceWaitMs(wrm_start),
+                                  "Gfx WaitRegMem timeout (#{}, {:.1f} ms, limit {:.1f} ms): mem_space={} addr/reg={:#x} func={} "
+                                  "ref={:#x} current={:#x} — forcing fence", forced_fences, FenceWaitMs(wrm_start), gfx_fence_watchdog.limit_ms,
                                   static_cast<u32>(wait_reg_mem->mem_space.Value()),
                                   is_mem
                                       ? reinterpret_cast<u64>(wait_reg_mem->Address<const u32*>())
@@ -919,9 +951,15 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                                           PM4CmdWaitRegMem::Function::Equal) {
                             *wait_reg_mem->Address<u32*>() = wait_reg_mem->ref;
                         }
+                        wrm_forced = true;
                         break;
                     }
                     YIELD_GFX();
+                }
+                if (wrm_forced) {
+                    gfx_fence_watchdog.Forced();
+                } else {
+                    gfx_fence_watchdog.Satisfied(FenceWaitMs(wrm_start));
                 }
                 // Distribution probe: how many spins do satisfied waits take?
                 {
@@ -930,8 +968,9 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     spin_max = std::max<u64>(spin_max, wrm_spins);
                     if (++wait_count % 512 == 0) {
                         LOG_INFO(Render_Vulkan,
-                                 "WaitRegMem stats: waits = {}, avg spins = {}, max spins = {}",
-                                 wait_count, spin_total / wait_count, spin_max);
+                                 "WaitRegMem stats: waits = {}, avg spins = {}, max spins = {}, forced = {}, limit = {:.1f} ms",
+                                 wait_count, spin_total / wait_count, spin_max, gfx_fence_watchdog.forced,
+                                 gfx_fence_watchdog.limit_ms);
                         spin_max = 0;
                     }
                 }
@@ -1253,16 +1292,17 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             const auto* wait_reg_mem = reinterpret_cast<const PM4CmdWaitRegMem*>(header);
             ASSERT(wait_reg_mem->engine.Value() == PM4CmdWaitRegMem::Engine::Me);
             u64 wrm_spins = 0;
+            bool wrm_forced = false;
             const auto wrm_start = std::chrono::steady_clock::now();
             while (!wait_reg_mem->Test(regs.reg_array)) {
-                if (++wrm_spins >= 500'000 && wrm_spins % 4'096 == 0 && FenceWaitExpired(wrm_start)) {
+                if (++wrm_spins >= 500'000 && wrm_spins % 4'096 == 0 && asc_fence_watchdog.Expired(wrm_start)) {
                     const bool is_mem =
                         wait_reg_mem->mem_space.Value() == PM4CmdWaitRegMem::MemSpace::Memory;
                     const u32 current = is_mem ? *wait_reg_mem->Address<const u32*>()
                                                : regs.reg_array[wait_reg_mem->Reg()];
                     LOG_ERROR(Render_Vulkan,
-                              "Asc WaitRegMem timeout ({} ms): mem_space={} addr/reg={:#x} func={} "
-                              "ref={:#x} current={:#x} — forcing fence", FenceWaitMs(wrm_start),
+                              "Asc WaitRegMem timeout ({:.1f} ms, limit {:.1f} ms): mem_space={} addr/reg={:#x} func={} "
+                              "ref={:#x} current={:#x} — forcing fence", FenceWaitMs(wrm_start), asc_fence_watchdog.limit_ms,
                               static_cast<u32>(wait_reg_mem->mem_space.Value()),
                               is_mem ? reinterpret_cast<u64>(wait_reg_mem->Address<const u32*>())
                                      : wait_reg_mem->Reg(),
@@ -1272,9 +1312,15 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
                         wait_reg_mem->function.Value() == PM4CmdWaitRegMem::Function::Equal) {
                         *wait_reg_mem->Address<u32*>() = wait_reg_mem->ref;
                     }
+                    wrm_forced = true;
                     break;
                 }
                 YIELD_ASC(vqid);
+            }
+            if (wrm_forced) {
+                asc_fence_watchdog.Forced();
+            } else {
+                asc_fence_watchdog.Satisfied(FenceWaitMs(wrm_start));
             }
             break;
         }
