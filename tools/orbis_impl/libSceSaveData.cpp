@@ -9,6 +9,7 @@
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <cctype>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -224,7 +225,11 @@ void CopyCString(char* target, std::size_t capacity, const std::string& text) {
 }
 
 bool ValidDirName(const std::string& name) {
-    return !name.empty() && name != "." && name != ".." && name.find_first_of("/\\:*?\"<>|") == std::string::npos;
+    if (name.empty() || name.size() > 31) return false;
+    for (const char c : name) {
+        if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_' && c != '-') return false;
+    }
+    return true;
 }
 
 fs::path ParamFile(const fs::path& dir) {
