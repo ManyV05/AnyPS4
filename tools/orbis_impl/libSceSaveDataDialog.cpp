@@ -159,6 +159,7 @@ ORBIS_SYSV_ABI s32 orbis_sceSaveDataDialogInitialize() {
 
 ORBIS_SYSV_ABI s32 orbis_sceSaveDataDialogTerminate() {
     Trace("sceSaveDataDialogTerminate", "YuH2FA7azqQ");
+    if (status != kStatusNone) Log("terminate");
     status = kStatusNone;
     return 0;
 }
@@ -264,11 +265,16 @@ ORBIS_SYSV_ABI s32 orbis_sceSaveDataDialogGetResult(DialogResult* result) {
 
 ORBIS_SYSV_ABI s32 orbis_sceSaveDataDialogClose() {
     Trace("sceSaveDataDialogClose", "fH46Lag88XY");
-    if (status == kStatusRunning || status == kStatusFinished) {
-        char text[100];
-        std::snprintf(text, sizeof text, "close: mode %s after %u status updates", ModeName(openedMode), updatesSinceOpen);
+    if (status == kStatusRunning) {
+        // Like the system (and shadPS4's SaveDialogUi::Finish): closing a running
+        // dialog ends it with no button, FINISHED, and the title then polls
+        // UpdateStatus for FINISHED and reads the result. Leaving it at
+        // INITIALIZED kept the title waiting forever after its load progress bar.
+        answerButton = kButtonIdInvalid;
+        status = kStatusFinished;
+        char text[120];
+        std::snprintf(text, sizeof text, "close: mode %s after %u status updates -> finished", ModeName(openedMode), updatesSinceOpen);
         Log(text);
-        status = kStatusInitialized;
     }
     return 0;
 }
