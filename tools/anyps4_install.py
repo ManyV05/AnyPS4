@@ -20,6 +20,7 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 VENDORED = [
     "libSceGnmDriver_padebug.prx=3rdparty/shadps4-gnm:libSceGnmDriver",
     "libSceNgs2.prx=3rdparty/shadps4-ngs2:libSceNgs2",
@@ -67,6 +68,7 @@ def main() -> int:
     parser.add_argument("--ninja", default=os.environ.get("ANYPS4_NINJA", ""), help="ninja executable (for a fresh configure)")
     parser.add_argument("--skip-build", action="store_true", help="only relink and generate; reuse the libraries already in <out>/libs")
     parser.add_argument("--pool", default=None, help="directory of <name>.json records for every installed title (default %%APPDATA%%/AnyPS4/registries); the libraries are generated for the union of them")
+    parser.add_argument("--image-base", type=lambda v: int(v, 0), default=0x400000, help="fixed image base for the relinked executable, ASLR off (default 0x400000 like the console; 0 keeps the relinker's 0x140000000 with ASLR)")
     args = parser.parse_args()
 
     game = args.game.resolve()
@@ -96,6 +98,10 @@ def main() -> int:
     if not registry.is_file():
         log(f"error: {registry} was not written")
         return 4
+    if args.image_base:
+        from anyps4_rebase import rebase
+        old_base, new_base = rebase(out / (name + ".exe"), args.image_base)
+        log(f"  image base {old_base:#x} -> {new_base:#x}, ASLR off")
 
     log("== 2/4 generating the runtime libraries' sources")
     pool = Path(args.pool) if args.pool else Path(os.environ.get("APPDATA", str(REPO))) / "AnyPS4" / "registries"
