@@ -352,7 +352,7 @@ ORBIS_SYSV_ABI s32 orbis_sceSaveDataTerminate() {
 ORBIS_SYSV_ABI s32 orbis_sceSaveDataMount(const Mount* mount, MountResult* result) {
     Trace("sceSaveDataMount", "32HQAQdwM2o");
     auto& state = Global();
-    std::lock_guard guard(state.lock);
+    std::unique_lock guard(state.lock);
     if (!state.initialized) return kErrorNotInitialized;
     if (mount == nullptr || result == nullptr || mount->dirName == nullptr) return kErrorParameter;
     EnsureInitialized(state);
@@ -386,25 +386,32 @@ ORBIS_SYSV_ABI s32 orbis_sceSaveDataMount(const Mount* mount, MountResult* resul
     }
     if (free == nullptr) return kErrorMountFull;
     const bool created = !exists;
+    free->used = true;
+    free->mountPoint = "/savedata" + std::to_string(index);
+    free->dirName = dirName;
+    free->hostPath = hostPath;
+    free->readOnly = readOnly;
+    const std::string mountPoint = free->mountPoint;
+    const AliasFunction addAlias = state.addAlias;
+    guard.unlock();
     if (created) {
         fs::create_directories(hostPath / "sce_sys", error);
-        if (error) return kErrorInternal;
+        if (error) {
+            guard.lock();
+            *free = Slot{};
+            return kErrorInternal;
+        }
         Param param{};
         param.mtime = static_cast<std::int64_t>(std::time(nullptr));
         SaveParam(hostPath, param);
         std::ofstream blocks(BlocksFile(hostPath));
         blocks << (mount->blocks != 0 ? mount->blocks : kDefaultBlocks);
     }
-    free->used = true;
-    free->mountPoint = "/savedata" + std::to_string(index);
-    free->dirName = dirName;
-    free->hostPath = hostPath;
-    free->readOnly = readOnly;
-    if (state.addAlias != nullptr) state.addAlias(free->mountPoint.c_str(), fs::absolute(hostPath, error).string().c_str());
+    if (addAlias != nullptr) addAlias(mountPoint.c_str(), fs::absolute(hostPath, error).string().c_str());
     std::memset(result, 0, sizeof *result);
-    CopyCString(result->mountPoint.data, sizeof result->mountPoint.data, free->mountPoint);
+    CopyCString(result->mountPoint.data, sizeof result->mountPoint.data, mountPoint);
     result->mountStatus = created ? 1 : 0;
-    Log("mount " + dirName + " mode " + std::to_string(mount->mountMode) + " -> " + free->mountPoint + (created ? " (created)" : " (existing)") + " at " +
+    Log("mount " + dirName + " mode " + std::to_string(mount->mountMode) + " -> " + mountPoint + (created ? " (created)" : " (existing)") + " at " +
         hostPath.string());
     return 0;
 }
@@ -422,11 +429,14 @@ ORBIS_SYSV_ABI s32 orbis_sceSaveDataUmount(const MountPoint* mountPoint) {
 ORBIS_SYSV_ABI s32 orbis_sceSaveDataSetParam(const MountPoint* mountPoint, u32 type, const void* buffer, std::size_t size) {
     Trace("sceSaveDataSetParam", "85zul--eGXs");
     auto& state = Global();
-    std::lock_guard guard(state.lock);
+    std::unique_lock guard(state.lock);
     if (!state.initialized) return kErrorNotInitialized;
     if (buffer == nullptr) return kErrorParameter;
-    Slot* slot = FindSlot(state, mountPoint);
-    if (slot == nullptr) return kErrorNotMounted;
+    const Slot* found = FindSlot(state, mountPoint);
+    if (found == nullptr) return kErrorNotMounted;
+    const Slot slotCopy = *found;
+    const Slot* slot = &slotCopy;
+    guard.unlock();
     Param param{};
     if (!LoadParam(slot->hostPath, param)) std::memset(&param, 0, sizeof param);
     switch (type) {
@@ -464,11 +474,14 @@ ORBIS_SYSV_ABI s32 orbis_sceSaveDataSetParam(const MountPoint* mountPoint, u32 t
 ORBIS_SYSV_ABI s32 orbis_sceSaveDataSaveIcon(const MountPoint* mountPoint, const Icon* icon) {
     Trace("sceSaveDataSaveIcon", "c88Yy54Mx0w");
     auto& state = Global();
-    std::lock_guard guard(state.lock);
+    std::unique_lock guard(state.lock);
     if (!state.initialized) return kErrorNotInitialized;
     if (icon == nullptr || icon->buf == nullptr) return kErrorParameter;
-    Slot* slot = FindSlot(state, mountPoint);
-    if (slot == nullptr) return kErrorNotMounted;
+    const Slot* found = FindSlot(state, mountPoint);
+    if (found == nullptr) return kErrorNotMounted;
+    const Slot slotCopy = *found;
+    const Slot* slot = &slotCopy;
+    guard.unlock();
     std::error_code error;
     fs::create_directories(slot->hostPath / "sce_sys", error);
     std::ofstream file(slot->hostPath / "sce_sys" / "icon0.png", std::ios::binary | std::ios::trunc);
@@ -481,10 +494,12 @@ ORBIS_SYSV_ABI s32 orbis_sceSaveDataSaveIcon(const MountPoint* mountPoint, const
 ORBIS_SYSV_ABI s32 orbis_sceSaveDataDirNameSearch(const SearchCond* cond, SearchResult* result) {
     Trace("sceSaveDataDirNameSearch", "dyIhnXq-0SM");
     auto& state = Global();
-    std::lock_guard guard(state.lock);
+    std::unique_lock guard(state.lock);
     if (!state.initialized) return kErrorNotInitialized;
     if (cond == nullptr || result == nullptr) return kErrorParameter;
     EnsureInitialized(state);
+    const fs::path root = state.root;
+    guard.unlock();
     result->hitNum = 0;
     result->setNum = 0;
     struct Entry {
@@ -496,7 +511,7 @@ ORBIS_SYSV_ABI s32 orbis_sceSaveDataDirNameSearch(const SearchCond* cond, Search
     std::vector<Entry> entries;
     std::error_code error;
     const std::string pattern = cond->dirName != nullptr ? CString(cond->dirName->data, sizeof cond->dirName->data) : std::string();
-    for (const auto& item : fs::directory_iterator(state.root, error)) {
+    for (const auto& item : fs::directory_iterator(root, error)) {
         if (!item.is_directory(error)) continue;
         const std::string name = item.path().filename().string();
         if (name.rfind("sce_", 0) == 0 || !fs::exists(ParamFile(item.path()), error)) continue;
@@ -539,7 +554,7 @@ ORBIS_SYSV_ABI s32 orbis_sceSaveDataDirNameSearch(const SearchCond* cond, Search
 ORBIS_SYSV_ABI s32 orbis_sceSaveDataDelete(const Delete* request) {
     Trace("sceSaveDataDelete", "S1GkePI17zQ");
     auto& state = Global();
-    std::lock_guard guard(state.lock);
+    std::unique_lock guard(state.lock);
     if (!state.initialized) return kErrorNotInitialized;
     if (request == nullptr || request->dirName == nullptr) return kErrorParameter;
     EnsureInitialized(state);
@@ -550,6 +565,7 @@ ORBIS_SYSV_ABI s32 orbis_sceSaveDataDelete(const Delete* request) {
     }
     std::error_code error;
     const fs::path hostPath = state.root / dirName;
+    guard.unlock();
     if (!fs::is_directory(hostPath, error)) return kErrorNotFound;
     fs::remove_all(hostPath, error);
     Log("delete " + dirName + (error ? " failed" : ""));

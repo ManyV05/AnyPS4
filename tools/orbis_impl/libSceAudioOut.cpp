@@ -324,19 +324,24 @@ void MixBlock(State& state, std::vector<float>& mix) {
         const float gainLeft = typeGain * std::clamp(port.volume[0], 0, 32768) / 32768.0f;
         const float gainRight = typeGain * std::clamp(port.volume[1], 0, 32768) / 32768.0f;
         const double ratio = static_cast<double>(port.freq) / kMixFrequency;
+        const bool nativeRate = port.freq == kMixFrequency;
         const std::size_t available = port.queue.size() / 2;
-        double position = port.resamplePosition;
+        double position = nativeRate ? 0.0 : port.resamplePosition;
         u32 produced = 0;
         for (; produced < kMixFrames; ++produced) {
             const auto index = static_cast<std::size_t>(position);
             if (index >= available) break;
-            const std::size_t next = std::min(index + 1, available - 1);
-            const float t = static_cast<float>(position - static_cast<double>(index));
-            const float left = port.queue[index * 2] * (1.0f - t) + port.queue[next * 2] * t;
-            const float right = port.queue[index * 2 + 1] * (1.0f - t) + port.queue[next * 2 + 1] * t;
+            float left = port.queue[index * 2];
+            float right = port.queue[index * 2 + 1];
+            if (!nativeRate) {
+                const std::size_t next = std::min(index + 1, available - 1);
+                const float t = static_cast<float>(position - static_cast<double>(index));
+                left = left * (1.0f - t) + port.queue[next * 2] * t;
+                right = right * (1.0f - t) + port.queue[next * 2 + 1] * t;
+            }
             mix[static_cast<std::size_t>(produced) * 2] += left * gainLeft;
             mix[static_cast<std::size_t>(produced) * 2 + 1] += right * gainRight;
-            position += ratio;
+            position += nativeRate ? 1.0 : ratio;
         }
         if (produced < kMixFrames && port.outputs > 0) ++port.underruns;
         const auto consumed = std::min(static_cast<std::size_t>(position), available);

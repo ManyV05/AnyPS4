@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <boost/preprocessor/repetition/repeat.hpp>
 #include <boost/preprocessor/stringize.hpp>
@@ -84,6 +86,27 @@ static const char* acb_task_name[] = NAME_ARRAY(ACB_TASK, MAX_NAMES);
 #define RESUME_ASC(task, id) RESUME(task, acb_task_name[id])
 
 std::array<u8, 48_KB> Liverpool::ConstantEngine::constants_heap;
+
+// AnyPS4: forcing a CPU-written fence is a last resort for a real CPU<->GPU
+// deadlock. The spin counts the fork tuned (100k gfx, 500k asc) elapse in a few
+// milliseconds here, well inside a normal CPU frame, so the CP ran ahead of the
+// title's writes (torn vertex and texture data: flicker, black lines, garbage
+// particles). The spin threshold now only arms a wall-clock timeout
+// (ORBIS_GNM_FENCE_TIMEOUT_MS, 1000 by default), the way the hardware simply
+// waits.
+static bool FenceWaitExpired(std::chrono::steady_clock::time_point start) {
+    static const auto timeout = [] {
+        const char* v = std::getenv("ORBIS_GNM_FENCE_TIMEOUT_MS");
+        const long ms = v != nullptr ? std::strtol(v, nullptr, 10) : 1000;
+        return std::chrono::milliseconds(ms > 0 ? ms : 1000);
+    }();
+    return std::chrono::steady_clock::now() - start >= timeout;
+}
+
+static long FenceWaitMs(std::chrono::steady_clock::time_point start) {
+    return static_cast<long>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count());
+}
 
 static std::span<const u32> NextPacket(std::span<const u32> span, size_t offset) {
     if (offset > span.size()) {
@@ -863,6 +886,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     break;
                 }
                 u64 wrm_spins = 0;
+                const auto wrm_start = std::chrono::steady_clock::now();
                 while (!wait_reg_mem->Test(regs.reg_array)) {
                     ++wrm_spins;
                     if (wrm_spins % 4'096 == 0) {
@@ -873,7 +897,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                         // guest may take the lock again (SubmitDone) while we are parked.
                         Platform::IrqC::Instance()->Signal(Platform::InterruptId::GpuIdle);
                     }
-                    if (wrm_spins >= 100'000) {
+                    if (wrm_spins >= 100'000 && wrm_spins % 4'096 == 0 && FenceWaitExpired(wrm_start)) {
                         // Watchdog: the fence value never arrived (CPU<->GPU deadlock).
                         // Force the expected value and continue so the pipeline unjams.
                         const bool is_mem = wait_reg_mem->mem_space.Value() ==
@@ -881,10 +905,10 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                         const u32 current = is_mem ? *wait_reg_mem->Address<const u32*>()
                                                    : regs.reg_array[wait_reg_mem->Reg()];
                         static u64 forced_fences = 0;
-                        if (forced_fences++ % 1000 == 0)
+                        if (forced_fences++ % 100 == 0)
                         LOG_ERROR(Render_Vulkan,
-                                  "Gfx WaitRegMem timeout (#{}): mem_space={} addr/reg={:#x} func={} "
-                                  "ref={:#x} current={:#x} — forcing fence", forced_fences,
+                                  "Gfx WaitRegMem timeout (#{}, {} ms): mem_space={} addr/reg={:#x} func={} "
+                                  "ref={:#x} current={:#x} — forcing fence", forced_fences, FenceWaitMs(wrm_start),
                                   static_cast<u32>(wait_reg_mem->mem_space.Value()),
                                   is_mem
                                       ? reinterpret_cast<u64>(wait_reg_mem->Address<const u32*>())
@@ -1229,15 +1253,16 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             const auto* wait_reg_mem = reinterpret_cast<const PM4CmdWaitRegMem*>(header);
             ASSERT(wait_reg_mem->engine.Value() == PM4CmdWaitRegMem::Engine::Me);
             u64 wrm_spins = 0;
+            const auto wrm_start = std::chrono::steady_clock::now();
             while (!wait_reg_mem->Test(regs.reg_array)) {
-                if (++wrm_spins >= 500'000) {
+                if (++wrm_spins >= 500'000 && wrm_spins % 4'096 == 0 && FenceWaitExpired(wrm_start)) {
                     const bool is_mem =
                         wait_reg_mem->mem_space.Value() == PM4CmdWaitRegMem::MemSpace::Memory;
                     const u32 current = is_mem ? *wait_reg_mem->Address<const u32*>()
                                                : regs.reg_array[wait_reg_mem->Reg()];
                     LOG_ERROR(Render_Vulkan,
-                              "Asc WaitRegMem timeout: mem_space={} addr/reg={:#x} func={} "
-                              "ref={:#x} current={:#x} — forcing fence",
+                              "Asc WaitRegMem timeout ({} ms): mem_space={} addr/reg={:#x} func={} "
+                              "ref={:#x} current={:#x} — forcing fence", FenceWaitMs(wrm_start),
                               static_cast<u32>(wait_reg_mem->mem_space.Value()),
                               is_mem ? reinterpret_cast<u64>(wait_reg_mem->Address<const u32*>())
                                      : wait_reg_mem->Reg(),

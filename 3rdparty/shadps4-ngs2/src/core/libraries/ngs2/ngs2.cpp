@@ -8,6 +8,7 @@
 #include <cstring>
 #include <deque>
 #include <mutex>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -327,14 +328,39 @@ std::mutex engine_mutex;
 // AnyPS4: ORBIS_NGS2_TRACE=1 logs every voice event, volume, matrix and setup
 // without the caps below, to reconstruct what a title asks of its voices.
 const bool trace_all = std::getenv("ORBIS_NGS2_TRACE") != nullptr;
-// AnyPS4: the fork kept music voices alive through Stop/Kill and floored their
-// volume because the title fades a track out one second after starting it.
-// The trace shows that is the title's intro-to-loop crossfade between two
-// voices, so by default Stop, Kill and the requested volume are honoured;
-// ORBIS_NGS2_MUSIC_HOLD=1 restores the fork's behaviour.
-const bool music_hold = std::getenv("ORBIS_NGS2_MUSIC_HOLD") != nullptr;
-// ORBIS_NGS2_MUSIC_FAITHFUL=1 disables even the scoped hold: every Stop and Kill ends the track.
-const bool music_faithful = std::getenv("ORBIS_NGS2_MUSIC_FAITHFUL") != nullptr;
+// AnyPS4: music hold mode (ORBIS_NGS2_MUSIC_HOLD). "fork", the default: Stop
+// and Kill on a music voice are suppressed and the next music Play retires it,
+// which is the behaviour of the user's shadPS4 fork, the reference this title
+// is known to play correctly with. "scoped": only a track the title fades
+// within its first three seconds while nothing else plays is held. "off" (or
+// ORBIS_NGS2_MUSIC_FAITHFUL=1): every Stop and Kill ends the track.
+const std::string music_hold_mode = [] {
+    const char* v = std::getenv("ORBIS_NGS2_MUSIC_HOLD");
+    return v == nullptr || std::string(v) == "1" ? std::string("fork") : std::string(v);
+}();
+const bool music_faithful = music_hold_mode == "off" || std::getenv("ORBIS_NGS2_MUSIC_FAITHFUL") != nullptr;
+const bool music_hold = !music_faithful && music_hold_mode != "scoped";
+// AnyPS4: the mastering (bus) voices report PLAYING with real peak meters only
+// with ORBIS_NGS2_MASTERING_METERS=1; by default they report like the fork
+// (never PLAYING, meters at zero), the state this title's music sequencing and
+// dialogue ducking are known to work with.
+const bool mastering_meters = std::getenv("ORBIS_NGS2_MASTERING_METERS") != nullptr;
+// AnyPS4: the extended sampler state (bytes consumed, block user data, waveform
+// pointer) is filled only with ORBIS_NGS2_SAMPLER_EXT=1; the fork leaves it zero.
+const bool sampler_ext_state = std::getenv("ORBIS_NGS2_SAMPLER_EXT") != nullptr;
+// AnyPS4: raw VAGp files are parsed by sceNgs2ParseWaveformData unless
+// ORBIS_NGS2_VAG_PARSE=0 (the fork reports its generic defaults for them).
+const bool vag_parse = [] {
+    const char* v = std::getenv("ORBIS_NGS2_VAG_PARSE");
+    return v == nullptr || *v != '0';
+}();
+// AnyPS4: a voice reuses its cached grain while it runs ahead of the wall
+// clock by more than this window. The fork's 8 ms is the default again now that
+// sceAudioOutOutput paces the title per chunk; ORBIS_NGS2_GRAIN_WINDOW_MS overrides.
+const double grain_window = [] {
+    const char* v = std::getenv("ORBIS_NGS2_GRAIN_WINDOW_MS");
+    return v != nullptr ? std::atof(v) / 1000.0 : 0.008;
+}();
 std::unordered_map<uintptr_t, Voice> voice_registry;         // voice handle -> voice
 std::unordered_map<uintptr_t, uintptr_t> rack_system;        // rack handle -> system handle
 // AnyPS4: rack ids by rack handle, and per-bus peak meters (left, right) of
@@ -907,7 +933,7 @@ s32 PS4_SYSV_ABI sceNgs2ParseWaveformData(const void* data, size_t dataSize,
     // sound effect. Big-endian data size at 0x0C and sample rate at 0x10, the
     // channel count at 0x1E; 16-byte units of 28 samples. The data offset stays
     // 0 so the decoder still sees the header and takes its rate and channels.
-    if (data != nullptr && dataSize >= 64 && std::memcmp(data, "VAGp", 4) == 0) {
+    if (vag_parse && data != nullptr && dataSize >= 64 && std::memcmp(data, "VAGp", 4) == 0) {
         const auto* bytes = static_cast<const u8*>(data);
         auto be32 = [&](size_t at) { return (u32(bytes[at]) << 24) | (u32(bytes[at + 1]) << 16) | (u32(bytes[at + 2]) << 8) | u32(bytes[at + 3]); };
         const u32 channels = std::max<u32>(bytes[0x1E], 1u);
@@ -1310,11 +1336,11 @@ s32 PS4_SYSV_ABI sceNgs2SystemRender(OrbisNgs2Handle systemHandle,
                               std::chrono::duration<double>(double(voice.clock_samples) /
                                                             48000.0));
             }
-            if (ahead < 0.064 || voice.grain_len != num_samples) {
+            if (ahead < grain_window || voice.grain_len != num_samples) {
                 // Gain: port volume; for music also the matrix peak (the game's
                 // fade engine ramps music in/out through matrix levels — without
                 // it, crossfade successor tracks play at their initial silence).
-                float gain = voice.stop_requested ? voice.peak_volume : voice.volume;
+                float gain = voice.stop_requested && !music_hold ? voice.peak_volume : voice.volume;
                 if (voice.is_music) {
                     gain *= voice.matrix_gain;
                     // Workaround: the game demands near-silence from music tracks
@@ -1323,7 +1349,7 @@ s32 PS4_SYSV_ABI sceNgs2SystemRender(OrbisNgs2Handle systemHandle,
                     // track changes still swap via voice retirement.
                     static const float music_floor = [] {
                         const char* value = std::getenv("ORBIS_NGS2_MUSIC_FLOOR");
-                        return value != nullptr ? static_cast<float>(std::atof(value)) : 0.4f;
+                        return value != nullptr ? static_cast<float>(std::atof(value)) : 0.6f;
                     }();
                     if (music_hold && gain < 0.25f) {
                         gain = music_floor;
@@ -1783,7 +1809,7 @@ s32 PS4_SYSV_ABI sceNgs2VoiceGetState(OrbisNgs2Handle voiceHandle, OrbisNgs2Voic
             // silent). The fork reported it idle with meters stuck at one,
             // which made the title fade its music out after a second and, in
             // the other variant, duck it permanently.
-            if (IsMasteringVoice(voiceHandle)) {
+            if (mastering_meters && IsMasteringVoice(voiceHandle)) {
                 outState->stateFlags = NGS2_VOICE_STATE_FLAG_INUSE | NGS2_VOICE_STATE_FLAG_ACTIVE |
                                        (v.playing ? NGS2_VOICE_STATE_FLAG_PLAYING : 0);
                 if (stateSize >= sizeof(OrbisNgs2MasteringVoiceState)) {
@@ -1820,7 +1846,7 @@ s32 PS4_SYSV_ABI sceNgs2VoiceGetState(OrbisNgs2Handle voiceHandle, OrbisNgs2Voic
             // AnyPS4: the sampler state also reports the bytes consumed, the
             // user data of the block being played and the waveform base
             // pointer; titles drive their streaming and fades from them.
-            if (stateSize >= sizeof(OrbisNgs2SamplerVoiceState)) {
+            if (sampler_ext_state && stateSize >= sizeof(OrbisNgs2SamplerVoiceState)) {
                 u64 consumed = 0;
                 uintptr_t user_data = 0;
                 const void* base = nullptr;
@@ -1873,7 +1899,7 @@ s32 PS4_SYSV_ABI sceNgs2VoiceGetStateFlags(OrbisNgs2Handle voiceHandle, u32* out
         std::scoped_lock lk{engine_mutex};
         const auto it = voice_registry.find(voiceHandle);
         if (it != voice_registry.end() && it->second.known) {
-            const bool playing_now = IsMasteringVoice(voiceHandle)
+            const bool playing_now = mastering_meters && IsMasteringVoice(voiceHandle)
                                          ? it->second.playing
                                          : it->second.playing && it->second.has_data && it->second.starved_renders < 2;
             *outStateFlags = NGS2_VOICE_STATE_FLAG_INUSE | NGS2_VOICE_STATE_FLAG_ACTIVE |
