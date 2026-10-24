@@ -66,7 +66,7 @@ def main() -> int:
     parser.add_argument("--cmake", default=os.environ.get("ANYPS4_CMAKE", "cmake"))
     parser.add_argument("--ninja", default=os.environ.get("ANYPS4_NINJA", ""), help="ninja executable (for a fresh configure)")
     parser.add_argument("--skip-build", action="store_true", help="only relink and generate; reuse the libraries already in <out>/libs")
-    parser.add_argument("--pool", default=None, help="directory of <name>.json records for every installed title (default %APPDATA%/AnyPS4/registries); the libraries are generated for the union of them")
+    parser.add_argument("--pool", default=None, help="directory of <name>.json records for every installed title (default %%APPDATA%%/AnyPS4/registries); the libraries are generated for the union of them")
     args = parser.parse_args()
 
     game = args.game.resolve()
