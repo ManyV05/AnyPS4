@@ -453,6 +453,18 @@ constexpr u32 kMaxDumpFiles = 256;
 constexpr u64 kMaxDumpSeconds = 120;
 std::unordered_map<uintptr_t, u32> rack_limits; // rack handle -> maxVoices from its option
 
+// A music track is a long waveform (over 1 MB) on a small rack: this title's
+// BGM rack has 8 voices and its effect and dialogue racks 64 and 256. Size
+// alone also caught a 2 MB effect on the big rack, which the music hold then
+// kept alive through the title's Stop and Kill.
+bool IsMusicWaveform(uintptr_t voice_handle, u64 bytes) {
+    if (bytes <= 1'000'000) {
+        return false;
+    }
+    const auto it = rack_limits.find(RackOfVoice(voice_handle));
+    return it == rack_limits.end() || it->second == 0 || it->second <= 8;
+}
+
 extern "C" __declspec(dllimport) unsigned long __stdcall GetModuleFileNameW(void*, wchar_t*, unsigned long);
 
 const std::filesystem::path& DumpDirectory() {
@@ -528,21 +540,29 @@ void AppendVoiceDump(Voice& v, u32 rate, u32 channels) {
     }
     if (v.dump_file == nullptr) {
         static u32 files = 0;
-        if (files >= kMaxDumpFiles) {
+        const std::string name = fmt::format("voice-{:x}-{}hz-{}ch-{}.wav", v.handle, rate, channels, CodecName(v));
+        const std::filesystem::path path = DumpDirectory() / name;
+        std::error_code error;
+        const bool existing = std::filesystem::exists(path, error);
+        if (!existing && files >= kMaxDumpFiles) {
             return;
         }
-        const std::string name = fmt::format("voice-{:x}-{}hz-{}ch-{}-{:03}.wav", v.handle, rate, channels, CodecName(v), files);
-        const std::filesystem::path path = DumpDirectory() / name;
-        v.dump_file = std::fopen(path.string().c_str(), "wb");
+        v.dump_file = std::fopen(path.string().c_str(), existing ? "r+b" : "wb");
         if (v.dump_file == nullptr) {
             return;
         }
-        ++files;
         v.dump_rate = rate;
         v.dump_channels = channels;
-        v.dump_frames = 0;
-        WriteWavHeader(v.dump_file, rate, channels, 0);
-        LOG_INFO(Lib_Ngs2, "dumping voice {:#x} to {}", v.handle, path.string());
+        if (existing) {
+            std::fseek(v.dump_file, 0, SEEK_END);
+            const long size = std::ftell(v.dump_file);
+            v.dump_frames = size > 44 ? static_cast<u64>(size - 44) / (4ull * channels) : 0;
+        } else {
+            ++files;
+            v.dump_frames = 0;
+            WriteWavHeader(v.dump_file, rate, channels, 0);
+            LOG_INFO(Lib_Ngs2, "dumping voice {:#x} to {}", v.handle, path.string());
+        }
     }
     if (v.dump_frames >= kMaxDumpSeconds * rate) {
         return;
@@ -647,6 +667,15 @@ void ResetVoiceDecoder(Voice& v) {
     v.frame_samples = 0;
     v.frame_pos = 0;
     v.decoded_samples = 0;
+    // AnyPS4: the PCM kind and the VAG header values belong to the waveform
+    // being decoded, not to the voice slot. Left in place, a slot that had
+    // played a VAG effect resampled its next AT9 line at the VAG header's
+    // 44.1 kHz (8 % slow, a lower pitch) and a slot that had played PCM
+    // decoded its next VAG file as raw samples.
+    v.pcm_kind = Voice::PcmKind::Unknown;
+    v.vag_rate = 0;
+    v.vag_channels = 1;
+    std::memset(v.vag_hist, 0, sizeof v.vag_hist);
 }
 
 // Decode one 16-byte HEVAG/PS-ADPCM block into 28 mono float samples. HEVAG
@@ -1026,7 +1055,7 @@ void ProduceGrain(Voice& v, u32 num_samples, float gain) {
     if (IsAt9Format(v.format) && v.at9_ready && v.at9_info.samplingRate > 0) {
         src_rate = static_cast<u32>(v.at9_info.samplingRate);
     }
-    if (v.pcm_kind == Voice::PcmKind::Vag) {
+    if (!IsAt9Format(v.format) && v.pcm_kind == Voice::PcmKind::Vag) {
         src_channels = std::min<u32>(v.vag_channels, 2u);
         if (v.vag_rate != 0) {
             src_rate = v.vag_rate;
@@ -1065,20 +1094,29 @@ void ProduceGrain(Voice& v, u32 num_samples, float gain) {
                     }
                     v.src_pos += v.frame_samples;
                 }
-                if (!decoded) {
-                    u64 total = 0;
-                    for (const auto& b : v.blocks) {
-                        total += b.size;
-                    }
-                    if (total > 1'000'000) {
-                        // Music track reached its end (or its loop end): go back
-                        // to the loop start, decoding and discarding up to it.
-                        RewindVoice(v);
-                        v.skip_remaining += v.loop_start;
-                        decoded = decode_traced(v);
-                        if (decoded) {
-                            v.src_pos += v.frame_samples;
+                if (!decoded && v.is_music) {
+                    // Music track reached its end (or its loop end): go back to
+                    // the loop start. AT9 superframes decode independently, so
+                    // seek to the one holding the loop start and discard only
+                    // the remainder, instead of decoding from the first sample.
+                    RewindVoice(v);
+                    u64 skip = v.loop_start;
+                    if (IsAt9Format(v.format) && v.at9_info.superframeSize > 0 && v.at9_info.framesInSuperframe > 0 &&
+                        v.at9_info.frameSamples > 0 && v.blocks.size() == 1 && skip > 0) {
+                        const u64 per_superframe = u64(v.at9_info.framesInSuperframe) * u64(v.at9_info.frameSamples);
+                        const u64 superframe = skip / per_superframe;
+                        const u64 offset = superframe * u64(v.at9_info.superframeSize);
+                        if (offset < v.blocks[0].size) {
+                            v.byte_pos = static_cast<u32>(offset);
+                            v.src_pos = superframe * per_superframe;
+                            v.skip_remaining = 0;
+                            skip -= superframe * per_superframe;
                         }
+                    }
+                    v.skip_remaining += static_cast<u32>(skip);
+                    decoded = decode_traced(v);
+                    if (decoded) {
+                        v.src_pos += v.frame_samples;
                     }
                 }
                 if (!decoded) {
@@ -1783,7 +1821,7 @@ s32 PS4_SYSV_ABI sceNgs2VoiceControl(OrbisNgs2Handle voiceHandle,
                     for (const auto& b : voice.blocks) {
                         total_now += b.size;
                     }
-                    voice.is_music = total_now > 1'000'000;
+                    voice.is_music = IsMusicWaveform(voiceHandle, total_now);
                     {
                         std::scoped_lock loop_lk{loop_mutex};
                         const auto loop = loop_points.find(p->data);
@@ -1926,7 +1964,7 @@ s32 PS4_SYSV_ABI sceNgs2VoiceControl(OrbisNgs2Handle voiceHandle,
                     for (const auto& b : voice.blocks) {
                         own_bytes += b.size;
                     }
-                    if (own_bytes > 1'000'000) {
+                    if (voice.is_music) {
                         // A new music track starts: retire any music voice whose
                         // Stop we previously suppressed (track change).
                         for (auto& [other_handle, other] : voice_registry) {
@@ -2001,7 +2039,7 @@ s32 PS4_SYSV_ABI sceNgs2VoiceControl(OrbisNgs2Handle voiceHandle,
                 for (const auto& b : voice.blocks) {
                     total_bytes += b.size;
                 }
-                if (voice.playing && total_bytes > 1'000'000 && (music_hold || ShouldHoldMusic(voiceHandle, voice))) {
+                if (voice.playing && voice.is_music && (music_hold || ShouldHoldMusic(voiceHandle, voice))) {
                     voice.stop_requested = true;
                     LOG_INFO(Lib_Ngs2, "holding music voice {:#x} through Stop at {:.1f}s (volume {:.3f})", voiceHandle,
                              double(voice.decoded_samples) / 48000.0, voice.peak_volume);

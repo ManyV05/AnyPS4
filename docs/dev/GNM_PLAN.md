@@ -289,6 +289,20 @@ Three instruments in the vendored NGS2, all on with `ORBIS_NGS2_TRACE=1` (the la
 - **Voice lifecycle tracker**: every Play, Stop, StopImm, Kill, Pause and Resume logs `lifecycle <event> voice <h> rack <r> (id): active N / limit M, playing, has_data, pos`, where the limit is the rack's `maxVoices` from its creation option and N counts the rack's voices that are playing or pending; a full rack logs `Voice Leak Detected`. The 2000-render summary also prints every rack's `N / M`.
 - **Pitch and sample-rate monitor**: the first grain of every voice setup logs `rates voice <h>: file R Hz C ch (codec), declared R' Hz C' ch, pitch P, step S -> 48000 Hz`, flagging a declared rate that differs from the file's; `step` is the resampling increment actually used.
 
+### 4.4.15 Phase 4.6 (24 October 2026): what the audio telemetry showed, and the fixes
+
+Session `session-20261024-155326.log` (792 688 lines, Diagnostics on) and 256 voice dumps (110 MB).
+
+**Low-pitched voices: a stale decoder kind.** 113 `rates voice` lines read `file 44100 Hz 1 ch (at9), declared 48000 Hz 1 ch, step 0.9187`, although every AT9 mono setup declares 48 kHz, the files' RIFF headers say 48 kHz and the AT9 configuration (`0xf00670fe`) is 48 kHz. The 44.1 kHz came from the VAG branch of `ProduceGrain`: `ResetVoiceDecoder` never cleared `pcm_kind`, `vag_rate` and `vag_channels`, so a voice slot that had played a VAG effect kept `PcmKind::Vag` and its header rate, and the next AT9 line on that slot was resampled with step 0.9187, eight per cent slow and a semitone and a half low. The kind and the VAG values now reset with the decoder, and the VAG branch applies only to non-AT9 formats. The same stale state could decode a VAG file as raw PCM on a slot that had played PCM.
+
+**Effects that stop coming back: a 2 MB effect held as music.** The lifecycle tracker shows no leak (sampler racks peak at 10 of 256 and 1 of 64 voices; the 8-voice rack at `0x...100000` is the BGM rack; every Play of a one-shot ends by itself). But voice `0x4e53000000300070`, a 2 MB AT9 waveform on the 256-voice rack patched to the effects bus, was played 124 times and classified as music by size alone, so its Stop and Kill were suppressed by the music hold (`holding music voice 0x4e53000000300070 through Stop at 7.3s ... through Kill at 16.0s`). Music is now a long waveform on a small rack (`IsMusicWaveform`: over 1 MB and `maxVoices` at most 8), and the Play, Stop and Kill paths all use that classification.
+
+**Music loops.** The loop points are read and used (`music voice ... loops from sample 2535280 to 8668336`, positions in the render probe wrap at the loop end), but the rewind decoded and discarded up to the loop start (two million samples of AT9) in one render call, a stall at every loop. AT9 superframes decode independently, so the sampler now seeks to the superframe that holds the loop start and discards only the remainder.
+
+**Decoder output is sound.** Per-channel statistics of the dumps: VAG effects 44.1 kHz mono, peaks at 1.0, no discontinuities; AT9 dialogue 48 kHz mono, peaks 0.84-0.99, no discontinuities; AT9 stereo music both channels alike (RMS 0.08-0.20, no discontinuities). Nothing in the decoders needed changing.
+
+**Dumps.** One file per voice and format now, appended across setups (`voice-<handle>-<rate>hz-<ch>ch-<codec>.wav`), so a retriggered effect shows every play and the 256-file cap is not spent on one-shots.
+
 ### 4.5 Risks
 
 - Two Vulkan devices in one process (Agc's and Gnm's) is fine in phases 3.1 and 3.2 because no Agc title runs in the same process; it only matters if both drivers must coexist.
