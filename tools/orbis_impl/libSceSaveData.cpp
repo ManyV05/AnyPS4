@@ -263,13 +263,14 @@ u64 UsedBlocks(const fs::path& dir) {
     return (bytes + kBlockSize - 1) / kBlockSize;
 }
 
+// '%' is the wildcard of sceSaveDataDirNameSearch patterns (the title searches "WITCHANDNIGHT%"); '*' and '?' are accepted too.
 bool Glob(const std::string& pattern, const std::string& text) {
     std::size_t p = 0, t = 0, star = std::string::npos, mark = 0;
     while (t < text.size()) {
         if (p < pattern.size() && (pattern[p] == '?' || std::tolower(pattern[p]) == std::tolower(text[t]))) {
             ++p;
             ++t;
-        } else if (p < pattern.size() && pattern[p] == '*') {
+        } else if (p < pattern.size() && (pattern[p] == '*' || pattern[p] == '%')) {
             star = p++;
             mark = t;
         } else if (star != std::string::npos) {
@@ -279,7 +280,7 @@ bool Glob(const std::string& pattern, const std::string& text) {
             return false;
         }
     }
-    while (p < pattern.size() && pattern[p] == '*') ++p;
+    while (p < pattern.size() && (pattern[p] == '*' || pattern[p] == '%')) ++p;
     return p == pattern.size();
 }
 
