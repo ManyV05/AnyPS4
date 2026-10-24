@@ -5,8 +5,10 @@
 #include <chrono>
 #include <cstdlib>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <deque>
+#include <filesystem>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -179,6 +181,20 @@ bool ParseRiffWaveform(const void* data, size_t data_size, OrbisNgs2WaveformInfo
             loop_points.erase(data);
         }
     }
+    // AnyPS4 loop tracer: exact values extracted from the header vs what the
+    // game is told (loopBegin/EndPosition stay 0: reporting them crashed the
+    // game at bank load, see the fork's bisection).
+    if (loop_end > loop_begin) {
+        LOG_INFO(Lib_Ngs2,
+                 "waveform loop: data = {}, tag = {:#x}, {} ch, {} Hz, samples = {}, "
+                 "smpl loop = [{}, {}] ({:.1f}s..{:.1f}s), reported to game = no",
+                 data, format_tag, num_channels, sample_rate, num_samples, loop_begin, loop_end,
+                 sample_rate ? double(loop_begin) / sample_rate : 0.0,
+                 sample_rate ? double(loop_end) / sample_rate : 0.0);
+    } else if (trace_all) {
+        LOG_INFO(Lib_Ngs2, "waveform: data = {}, tag = {:#x}, {} ch, {} Hz, samples = {}, no loop",
+                 data, format_tag, num_channels, sample_rate, num_samples);
+    }
 
     WaveformUnit unit{};
     if (!DecodeAt9Config(config_data, unit)) {
@@ -307,6 +323,14 @@ struct Voice {
     u32 loop_end{};
     u64 src_pos{};        // AnyPS4: source samples decoded since the last rewind
 
+    // AnyPS4 diagnostics
+    uintptr_t handle{};   // this voice's handle (for logs and dump file names)
+    bool rate_logged{};   // the rate/pitch line was printed for the current setup
+    std::FILE* dump_file{};
+    u64 dump_frames{};
+    u32 dump_rate{};
+    u32 dump_channels{};
+
     // Decoder state
     void* at9_handle{};
     Atrac9CodecInfo at9_info{};
@@ -418,6 +442,160 @@ bool ShouldHoldMusic(uintptr_t voice_handle, const Voice& voice) {
         }
     }
     return voice.peak_volume > 0.01f;
+}
+
+// AnyPS4 diagnostics, on with ORBIS_NGS2_TRACE (the launcher's Diagnostics) or
+// ORBIS_NGS2_DUMP: every voice's decoded source PCM, exactly what the decoder
+// produced before resampling and mixing, as float32 WAV files in
+// <executable dir>/anyps4/audio_dumps/voice-<handle>-<rate>hz-<ch>ch-<codec>-<n>.wav.
+const bool dump_voices = trace_all || std::getenv("ORBIS_NGS2_DUMP") != nullptr;
+constexpr u32 kMaxDumpFiles = 256;
+constexpr u64 kMaxDumpSeconds = 120;
+std::unordered_map<uintptr_t, u32> rack_limits; // rack handle -> maxVoices from its option
+
+extern "C" __declspec(dllimport) unsigned long __stdcall GetModuleFileNameW(void*, wchar_t*, unsigned long);
+
+const std::filesystem::path& DumpDirectory() {
+    static const std::filesystem::path dir = [] {
+        wchar_t buffer[1024];
+        const unsigned long length = GetModuleFileNameW(nullptr, buffer, 1024);
+        std::filesystem::path path = length != 0 ? std::filesystem::path(std::wstring(buffer, length)).parent_path()
+                                                 : std::filesystem::current_path();
+        path /= "anyps4";
+        path /= "audio_dumps";
+        std::error_code error;
+        std::filesystem::create_directories(path, error);
+        return path;
+    }();
+    return dir;
+}
+
+void WriteWavHeader(std::FILE* file, u32 rate, u32 channels, u64 data_bytes) {
+    const u32 byte_rate = rate * channels * 4;
+    const u16 block_align = static_cast<u16>(channels * 4);
+    const u32 data_size = static_cast<u32>(std::min<u64>(data_bytes, 0xFFFFFFFFu - 44));
+    const u32 riff_size = 36 + data_size;
+    u8 header[44] = {'R', 'I', 'F', 'F'};
+    std::memcpy(header + 4, &riff_size, 4);
+    std::memcpy(header + 8, "WAVEfmt ", 8);
+    const u32 fmt_size = 16;
+    const u16 format = 3; // IEEE float
+    const u16 ch = static_cast<u16>(channels);
+    const u16 bits = 32;
+    std::memcpy(header + 16, &fmt_size, 4);
+    std::memcpy(header + 20, &format, 2);
+    std::memcpy(header + 22, &ch, 2);
+    std::memcpy(header + 24, &rate, 4);
+    std::memcpy(header + 28, &byte_rate, 4);
+    std::memcpy(header + 32, &block_align, 2);
+    std::memcpy(header + 34, &bits, 2);
+    std::memcpy(header + 36, "data", 4);
+    std::memcpy(header + 40, &data_size, 4);
+    std::fseek(file, 0, SEEK_SET);
+    std::fwrite(header, 1, sizeof header, file);
+}
+
+void CloseVoiceDump(Voice& v) {
+    if (v.dump_file == nullptr) {
+        return;
+    }
+    WriteWavHeader(v.dump_file, v.dump_rate, v.dump_channels, v.dump_frames * v.dump_channels * 4);
+    std::fclose(v.dump_file);
+    v.dump_file = nullptr;
+    v.dump_frames = 0;
+}
+
+bool IsAt9Format(const OrbisNgs2WaveformFormat& fmt);
+
+const char* CodecName(const Voice& v) {
+    if (IsAt9Format(v.format)) {
+        return "at9";
+    }
+    switch (v.pcm_kind) {
+    case Voice::PcmKind::Vag: return "vag";
+    case Voice::PcmKind::F32: return "f32";
+    case Voice::PcmKind::S16: return "s16";
+    default: return "pcm";
+    }
+}
+
+void AppendVoiceDump(Voice& v, u32 rate, u32 channels) {
+    if (!dump_voices || v.frame_samples == 0) {
+        return;
+    }
+    if (v.dump_file != nullptr && (v.dump_rate != rate || v.dump_channels != channels)) {
+        CloseVoiceDump(v);
+    }
+    if (v.dump_file == nullptr) {
+        static u32 files = 0;
+        if (files >= kMaxDumpFiles) {
+            return;
+        }
+        const std::string name = fmt::format("voice-{:x}-{}hz-{}ch-{}-{:03}.wav", v.handle, rate, channels, CodecName(v), files);
+        const std::filesystem::path path = DumpDirectory() / name;
+        v.dump_file = std::fopen(path.string().c_str(), "wb");
+        if (v.dump_file == nullptr) {
+            return;
+        }
+        ++files;
+        v.dump_rate = rate;
+        v.dump_channels = channels;
+        v.dump_frames = 0;
+        WriteWavHeader(v.dump_file, rate, channels, 0);
+        LOG_INFO(Lib_Ngs2, "dumping voice {:#x} to {}", v.handle, path.string());
+    }
+    if (v.dump_frames >= kMaxDumpSeconds * rate) {
+        return;
+    }
+    const size_t floats = std::min<size_t>(v.frame_pcm.size(), size_t(v.frame_samples) * channels);
+    std::fseek(v.dump_file, 0, SEEK_END);
+    std::fwrite(v.frame_pcm.data(), sizeof(float), floats, v.dump_file);
+    v.dump_frames += v.frame_samples;
+    if ((v.dump_frames / v.frame_samples) % 64 == 0) {
+        WriteWavHeader(v.dump_file, rate, channels, v.dump_frames * channels * 4);
+    }
+}
+
+// Voice lifecycle tracker: every Play/Stop/Kill/Pause/Resume with the rack's
+// active voice count against its maxVoices; a full rack is called out.
+void TrackVoiceEvent(uintptr_t voice_handle, const Voice& voice, u32 event) {
+    if (!trace_all) {
+        return;
+    }
+    static const char* const names[] = {"Play", "Stop", "StopImm", "Kill", "Pause", "Resume"};
+    const uintptr_t rack = RackOfVoice(voice_handle);
+    u32 active = 0;
+    for (const auto& [other_handle, other] : voice_registry) {
+        if (RackOfVoice(other_handle) == rack && (other.playing || other.pending_play)) {
+            ++active;
+        }
+    }
+    const auto limit_it = rack_limits.find(rack);
+    const u32 limit = limit_it != rack_limits.end() ? limit_it->second : 0;
+    const auto id_it = rack_ids.find(rack);
+    LOG_INFO(Lib_Ngs2, "lifecycle {} voice {:#x} rack {:#x} (id {}): active {} / limit {}, playing {}, has_data {}, pos {:.2f}s",
+             event < 6 ? names[event] : "?", voice_handle, rack, id_it != rack_ids.end() ? id_it->second : 0, active, limit,
+             voice.playing, voice.has_data, double(voice.decoded_samples) / 48000.0);
+    if (limit != 0 && active >= limit) {
+        LOG_WARNING(Lib_Ngs2, "Voice Leak Detected: rack {:#x} (id {}) has {} / {} voices active", rack,
+                    id_it != rack_ids.end() ? id_it->second : 0, active, limit);
+    }
+}
+
+void LogRackUsage() {
+    std::unordered_map<uintptr_t, u32> active;
+    for (const auto& [handle, voice] : voice_registry) {
+        if (voice.playing || voice.pending_play) {
+            ++active[RackOfVoice(handle)];
+        }
+    }
+    for (const auto& [rack, id] : rack_ids) {
+        const auto limit_it = rack_limits.find(rack);
+        const u32 limit = limit_it != rack_limits.end() ? limit_it->second : 0;
+        const u32 used = active.count(rack) != 0 ? active[rack] : 0;
+        LOG_INFO(Lib_Ngs2, "rack {:#x} (id {}): {} / {} voices active{}", rack, id, used, limit,
+                 limit != 0 && used >= limit ? "  <- Voice Leak Detected" : "");
+    }
 }
 
 // True for handles we minted in MakeRackHandle/MakeVoiceHandle. A synthetic
@@ -830,12 +1008,29 @@ void ProduceGrain(Voice& v, u32 num_samples, float gain) {
         src_rate = 48000;
     }
     const float step = (static_cast<float>(src_rate) / 48000.0f) * v.pitch;
+    if (trace_all && !v.rate_logged) {
+        // Pitch and sample-rate monitor: the file's rate as the decoder sees it
+        // against the rate the title declared in the voice setup, the pitch it
+        // asked for and the resulting resampling step into the 48 kHz output.
+        v.rate_logged = true;
+        LOG_INFO(Lib_Ngs2, "rates voice {:#x}: file {} Hz {} ch ({}), declared {} Hz {} ch, pitch {:.4f}, step {:.4f} -> 48000 Hz{}",
+                 v.handle, src_rate, src_channels, CodecName(v), static_cast<u32>(v.format.sampleRate),
+                 static_cast<u32>(v.format.numChannels), v.pitch, step,
+                 src_rate != v.format.sampleRate ? "  <- declared rate differs from the file" : "");
+    }
+    auto decode_traced = [&](Voice& voice) {
+        const bool ok = DecodeNextFrame(voice);
+        if (ok) {
+            AppendVoiceDump(voice, src_rate, src_channels);
+        }
+        return ok;
+    };
     for (u32 i = 0; i < num_samples; ++i) {
         // Ensure the cursor points at a valid source sample, skipping any
         // encoder-delay samples at block starts.
         while (true) {
             if (v.frame_pos >= v.frame_samples) {
-                bool decoded = v.loop_end == 0 || v.src_pos < v.loop_end ? DecodeNextFrame(v) : false;
+                bool decoded = v.loop_end == 0 || v.src_pos < v.loop_end ? decode_traced(v) : false;
                 if (decoded) {
                     if (v.loop_end != 0 && v.src_pos + v.frame_samples > v.loop_end) {
                         v.frame_samples = static_cast<u32>(std::max<u64>(v.loop_end - v.src_pos, 1));
@@ -852,7 +1047,7 @@ void ProduceGrain(Voice& v, u32 num_samples, float gain) {
                         // to the loop start, decoding and discarding up to it.
                         RewindVoice(v);
                         v.skip_remaining += v.loop_start;
-                        decoded = DecodeNextFrame(v);
+                        decoded = decode_traced(v);
                         if (decoded) {
                             v.src_pos += v.frame_samples;
                         }
@@ -1055,6 +1250,7 @@ s32 PS4_SYSV_ABI sceNgs2RackCreate(OrbisNgs2Handle systemHandle, u32 rackId,
         std::scoped_lock lk{engine_mutex};
         rack_system[*outHandle] = systemHandle;
         rack_ids[*outHandle] = rackId;
+        rack_limits[*outHandle] = option != nullptr ? option->maxVoices : 0;
         LOG_INFO(Lib_Ngs2, "rack {:#x} (id {}) on system {:#x}", *outHandle, rackId, systemHandle);
     }
     return ORBIS_OK;
@@ -1074,6 +1270,7 @@ s32 PS4_SYSV_ABI sceNgs2RackCreateWithAllocator(OrbisNgs2Handle systemHandle, u3
         std::scoped_lock lk{engine_mutex};
         rack_system[*outHandle] = systemHandle;
         rack_ids[*outHandle] = rackId;
+        rack_limits[*outHandle] = option != nullptr ? option->maxVoices : 0;
         LOG_INFO(Lib_Ngs2, "rack {:#x} (id {}) on system {:#x}", *outHandle, rackId, systemHandle);
     }
     return ORBIS_OK;
@@ -1429,6 +1626,7 @@ s32 PS4_SYSV_ABI sceNgs2SystemRender(OrbisNgs2Handle systemHandle,
                 LOG_INFO(Lib_Ngs2,
                          "active voices: vag = {}, at9 = {}, other = {}, empty queries = {}",
                          vag_active, at9_active, other_active, empty_state_queries.load());
+                LogRackUsage();
                 for (auto& [h, v] : voice_registry) {
                     if (v.is_music && (v.playing || v.stop_requested)) {
                         LOG_INFO(Lib_Ngs2,
@@ -1510,6 +1708,7 @@ s32 PS4_SYSV_ABI sceNgs2VoiceControl(OrbisNgs2Handle voiceHandle,
     LOG_DEBUG(Lib_Ngs2, "called");
     std::scoped_lock lk{engine_mutex};
     Voice& voice = voice_registry[voiceHandle];
+    voice.handle = voiceHandle;
     const auto* hdr = paramList;
     for (int i = 0; hdr && i < 64; ++i) {
         switch (hdr->id) {
@@ -1529,6 +1728,8 @@ s32 PS4_SYSV_ABI sceNgs2VoiceControl(OrbisNgs2Handle voiceHandle,
                 voice.paused = false;
                 voice.has_data = false;
                 voice.add_calls = 0;
+                voice.rate_logged = false;
+                CloseVoiceDump(voice);
                 ResetVoiceDecoder(voice);
             }
             break;
@@ -1753,6 +1954,7 @@ s32 PS4_SYSV_ABI sceNgs2VoiceControl(OrbisNgs2Handle voiceHandle,
                 // Kill frees the voice entirely.
                 voice.playing = false;
                 voice.pending_play = false;
+                CloseVoiceDump(voice);
                 voice.blocks.clear();
                 voice.has_data = false;
                 voice.is_music = false;
@@ -1785,6 +1987,7 @@ s32 PS4_SYSV_ABI sceNgs2VoiceControl(OrbisNgs2Handle voiceHandle,
                 break;
             }
             }
+            TrackVoiceEvent(voiceHandle, voice, event);
             break;
         }
         default: {

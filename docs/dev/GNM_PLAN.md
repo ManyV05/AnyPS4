@@ -281,6 +281,14 @@ Evidence: the launcher's session log of 13:19 to 14:21 (`anyps4/log/session-2026
 
 **Graphics.** Nothing changed in the renderer this phase: the symptoms described (green particle squares, a dark swamp, a narrative scene without lighting, the stretched parchment, the water cut) persisted with the fence forced at 8 ms as they did at 100 000 spins, so they are not the fence, and the vendored `video_core` is the fork's. The session log's only renderer messages are 1818 `Tracking memory region ... not fully GPU mapped` warnings from `page_manager.cpp` (the tracker protects the region anyway; the shim's `IsValidGpuMapping` is a bound check) and the usual unsupported-format notes. The next step for the graphics needs the screenshots or a session with Diagnostics on (frame dumps every 3000 flips land in `anyps4/screenshots`).
 
+### 4.4.14 Phase 4.5 (24 October 2026): NGS2 audio telemetry
+
+Three instruments in the vendored NGS2, all on with `ORBIS_NGS2_TRACE=1` (the launcher's Diagnostics box), so that the reported low-pitched voices, one-shot effects that never return and broken music loops can be read from data instead of descriptions:
+
+- **Voice PCM dumps** (`ORBIS_NGS2_DUMP=1` alone also enables them): every decoded source frame of every voice, exactly what the AT9, HEVAG or PCM decoder produced before resampling and mixing, is appended to `<install>/anyps4/audio_dumps/voice-<handle>-<rate>hz-<channels>ch-<codec>-<n>.wav` as 32-bit float WAV (header rewritten every 64 frames and at close; a new file per sampler setup or rate change; at most 256 files and 120 s each). A wrong decode is audible and visible in the file at the rate the decoder believed.
+- **Voice lifecycle tracker**: every Play, Stop, StopImm, Kill, Pause and Resume logs `lifecycle <event> voice <h> rack <r> (id): active N / limit M, playing, has_data, pos`, where the limit is the rack's `maxVoices` from its creation option and N counts the rack's voices that are playing or pending; a full rack logs `Voice Leak Detected`. The 2000-render summary also prints every rack's `N / M`.
+- **Pitch and sample-rate monitor**: the first grain of every voice setup logs `rates voice <h>: file R Hz C ch (codec), declared R' Hz C' ch, pitch P, step S -> 48000 Hz`, flagging a declared rate that differs from the file's; `step` is the resampling increment actually used.
+
 ### 4.5 Risks
 
 - Two Vulkan devices in one process (Agc's and Gnm's) is fine in phases 3.1 and 3.2 because no Agc title runs in the same process; it only matters if both drivers must coexist.
