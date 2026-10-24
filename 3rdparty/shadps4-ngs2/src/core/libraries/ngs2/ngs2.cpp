@@ -191,7 +191,7 @@ bool ParseRiffWaveform(const void* data, size_t data_size, OrbisNgs2WaveformInfo
                  data, format_tag, num_channels, sample_rate, num_samples, loop_begin, loop_end,
                  sample_rate ? double(loop_begin) / sample_rate : 0.0,
                  sample_rate ? double(loop_end) / sample_rate : 0.0);
-    } else if (trace_all) {
+    } else if (std::getenv("ORBIS_NGS2_TRACE") != nullptr) {
         LOG_INFO(Lib_Ngs2, "waveform: data = {}, tag = {:#x}, {} ch, {} Hz, samples = {}, no loop",
                  data, format_tag, num_channels, sample_rate, num_samples);
     }
@@ -557,12 +557,27 @@ void AppendVoiceDump(Voice& v, u32 rate, u32 channels) {
 }
 
 // Voice lifecycle tracker: every Play/Stop/Kill/Pause/Resume with the rack's
-// active voice count against its maxVoices; a full rack is called out.
+// active voice count against its maxVoices. The saturation check is always on:
+// a rack at its voice limit is the classic cause of SFX going progressively
+// mute, and the event counters show which side stopped recycling.
+std::atomic<u64> evt_plays{}, evt_stops{}, evt_kills{};
+
 void TrackVoiceEvent(uintptr_t voice_handle, const Voice& voice, u32 event) {
-    if (!trace_all) {
-        return;
-    }
     static const char* const names[] = {"Play", "Stop", "StopImm", "Kill", "Pause", "Resume"};
+    switch (event) {
+    case 0:
+        ++evt_plays;
+        break;
+    case 1:
+    case 2:
+        ++evt_stops;
+        break;
+    case 3:
+        ++evt_kills;
+        break;
+    default:
+        break;
+    }
     const uintptr_t rack = RackOfVoice(voice_handle);
     u32 active = 0;
     for (const auto& [other_handle, other] : voice_registry) {
@@ -573,12 +588,25 @@ void TrackVoiceEvent(uintptr_t voice_handle, const Voice& voice, u32 event) {
     const auto limit_it = rack_limits.find(rack);
     const u32 limit = limit_it != rack_limits.end() ? limit_it->second : 0;
     const auto id_it = rack_ids.find(rack);
-    LOG_INFO(Lib_Ngs2, "lifecycle {} voice {:#x} rack {:#x} (id {}): active {} / limit {}, playing {}, has_data {}, pos {:.2f}s",
-             event < 6 ? names[event] : "?", voice_handle, rack, id_it != rack_ids.end() ? id_it->second : 0, active, limit,
-             voice.playing, voice.has_data, double(voice.decoded_samples) / 48000.0);
-    if (limit != 0 && active >= limit) {
-        LOG_WARNING(Lib_Ngs2, "Voice Leak Detected: rack {:#x} (id {}) has {} / {} voices active", rack,
-                    id_it != rack_ids.end() ? id_it->second : 0, active, limit);
+    const u32 rack_id = id_it != rack_ids.end() ? id_it->second : 0;
+    if (trace_all) {
+        LOG_INFO(Lib_Ngs2, "lifecycle {} voice {:#x} rack {:#x} (id {}): active {} / limit {}, playing {}, has_data {}, pos {:.2f}s",
+                 event < 6 ? names[event] : "?", voice_handle, rack, rack_id, active, limit,
+                 voice.playing, voice.has_data, double(voice.decoded_samples) / 48000.0);
+    }
+    if (limit != 0 && active >= limit && event == 0) {
+        static std::unordered_map<uintptr_t, u64> last_reported;
+        u64& last = last_reported[rack];
+        const u64 plays = evt_plays.load();
+        if (plays - last >= limit) {
+            last = plays;
+            LOG_CRITICAL(Lib_Ngs2,
+                         "Voice Leak Detected: rack {:#x} (id {}) is full at {} / {} voices on a "
+                         "new Play; lifetime events: {} plays, {} stops, {} kills — the {} "
+                         "unreleased voices were never freed by Stop/Kill",
+                         rack, rack_id, active, limit, plays, evt_stops.load(), evt_kills.load(),
+                         active);
+        }
     }
 }
 

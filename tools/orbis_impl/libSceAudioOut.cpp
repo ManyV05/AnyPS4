@@ -133,22 +133,54 @@ struct State {
     Dump dump;
 };
 
-FILE* OpenDump(const Dump& dump, const char* name) {
+void WriteWavHeader(FILE* file, u32 freq, u32 channels, bool isFloat, u64 dataBytes) {
+    const u16 tag = isFloat ? 3 : 1;
+    const u16 bits = isFloat ? 32 : 16;
+    const u32 byteRate = freq * channels * (bits / 8u);
+    const u16 align = static_cast<u16>(channels * (bits / 8u));
+    u8 h[44];
+    auto w32 = [&](int o, u32 v) { std::memcpy(h + o, &v, 4); };
+    auto w16 = [&](int o, u16 v) { std::memcpy(h + o, &v, 2); };
+    std::memcpy(h, "RIFF", 4);
+    w32(4, static_cast<u32>(36 + dataBytes));
+    std::memcpy(h + 8, "WAVEfmt ", 8);
+    w32(16, 16);
+    w16(20, tag);
+    w16(22, static_cast<u16>(channels));
+    w32(24, freq);
+    w32(28, byteRate);
+    w16(32, align);
+    w16(34, bits);
+    std::memcpy(h + 36, "data", 4);
+    w32(40, static_cast<u32>(dataBytes));
+    std::fseek(file, 0, SEEK_SET);
+    std::fwrite(h, 1, sizeof h, file);
+}
+
+FILE* OpenDump(const Dump& dump, const char* name, u32 freq, u32 channels, bool isFloat) {
     char path[512];
     std::snprintf(path, sizeof path, "%s/%s", dump.directory, name);
     FILE* file = std::fopen(path, "wb");
     char text[600];
-    std::snprintf(text, sizeof text, "%s %s", file != nullptr ? "dumping to" : "cannot open", path);
+    std::snprintf(text, sizeof text, "%s %s (%u Hz, %u ch, %s)",
+                  file != nullptr ? "dumping to" : "cannot open", path, freq, channels,
+                  isFloat ? "float32" : "int16");
     std::fprintf(stderr, "[AudioOut] %s\n", text);
     std::fflush(stderr);
+    if (file != nullptr) {
+        WriteWavHeader(file, freq, channels, isFloat, 0);
+    }
     return file;
 }
 
 void DumpPortChunk(State& state, Port& port, s32 handle, const void* data) {
     if (!state.dump.Active()) return;
     const u64 cap = static_cast<u64>(state.dump.lengthSeconds * port.freq);
+    const u64 sampleBytes = port.isFloat ? 4 : 2;
     if (port.dumpFrames >= cap) {
         if (port.dump != nullptr) {
+            WriteWavHeader(port.dump, port.freq, port.sourceChannels, port.isFloat,
+                           port.dumpFrames * port.sourceChannels * sampleBytes);
             std::fclose(port.dump);
             port.dump = nullptr;
         }
@@ -156,15 +188,20 @@ void DumpPortChunk(State& state, Port& port, s32 handle, const void* data) {
     }
     if (port.dump == nullptr) {
         char name[96];
-        std::snprintf(name, sizeof name, "port%d-type%d-%uch-%s-%uhz.raw", handle, port.type, port.sourceChannels, port.isFloat ? "f32" : "s16", port.freq);
-        port.dump = OpenDump(state.dump, name);
+        std::snprintf(name, sizeof name, "port%d-type%d-%uch-%s-%uhz.wav", handle, port.type, port.sourceChannels, port.isFloat ? "f32" : "s16", port.freq);
+        port.dump = OpenDump(state.dump, name, port.freq, port.sourceChannels, port.isFloat);
         if (port.dump == nullptr) {
             port.dumpFrames = cap;
             return;
         }
     }
-    std::fwrite(data, port.isFloat ? 4 : 2, static_cast<std::size_t>(port.samples) * port.sourceChannels, port.dump);
+    std::fseek(port.dump, 0, SEEK_END);
+    std::fwrite(data, sampleBytes, static_cast<std::size_t>(port.samples) * port.sourceChannels, port.dump);
     port.dumpFrames += port.samples;
+    if ((port.dumpFrames / port.samples) % 64 == 0) {
+        WriteWavHeader(port.dump, port.freq, port.sourceChannels, port.isFloat,
+                       port.dumpFrames * port.sourceChannels * sampleBytes);
+    }
 }
 
 void DumpMixBlock(State& state, const std::vector<s16>& buffer) {
@@ -173,20 +210,25 @@ void DumpMixBlock(State& state, const std::vector<s16>& buffer) {
     const u64 cap = static_cast<u64>(state.dump.lengthSeconds * kMixFrequency);
     if (mixer.dumpFrames >= cap) {
         if (mixer.dump != nullptr) {
+            WriteWavHeader(mixer.dump, kMixFrequency, 2, false, mixer.dumpFrames * 2 * sizeof(s16));
             std::fclose(mixer.dump);
             mixer.dump = nullptr;
         }
         return;
     }
     if (mixer.dump == nullptr) {
-        mixer.dump = OpenDump(state.dump, "mix-2ch-s16-48000hz.raw");
+        mixer.dump = OpenDump(state.dump, "mix-2ch-s16-48000hz.wav", kMixFrequency, 2, false);
         if (mixer.dump == nullptr) {
             mixer.dumpFrames = cap;
             return;
         }
     }
+    std::fseek(mixer.dump, 0, SEEK_END);
     std::fwrite(buffer.data(), sizeof(s16), buffer.size(), mixer.dump);
     mixer.dumpFrames += kMixFrames;
+    if ((mixer.dumpFrames / kMixFrames) % 64 == 0) {
+        WriteWavHeader(mixer.dump, kMixFrequency, 2, false, mixer.dumpFrames * 2 * sizeof(s16));
+    }
 }
 
 State& Global() {
