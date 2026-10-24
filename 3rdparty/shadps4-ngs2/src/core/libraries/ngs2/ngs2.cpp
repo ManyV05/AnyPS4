@@ -100,6 +100,13 @@ WaveformUnit UnitFromFormat(const OrbisNgs2WaveformFormat* format) {
 }
 
 // Parse a standard RIFF/WAVE header (PCM or ATRAC9) into OrbisNgs2WaveformInfo.
+// AnyPS4: loop points of parsed RIFF waveforms by data pointer. They are not
+// reported to the title (reporting them makes it crash while loading a bank);
+// the sampler uses them to loop a music track seamlessly instead of restarting
+// it from the first sample.
+std::mutex loop_mutex;
+std::unordered_map<const void*, std::pair<u32, u32>> loop_points;
+
 bool ParseRiffWaveform(const void* data, size_t data_size, OrbisNgs2WaveformInfo* out) {
     const u8* p = static_cast<const u8*>(data);
     if (!p || data_size < 12) {
@@ -163,6 +170,14 @@ bool ParseRiffWaveform(const void* data, size_t data_size, OrbisNgs2WaveformInfo
     }
     if (sample_rate == 0 || num_channels == 0 || data_bytes == 0) {
         return false;
+    }
+    {
+        std::scoped_lock lk{loop_mutex};
+        if (loop_end > loop_begin) {
+            loop_points[data] = {loop_begin, loop_end};
+        } else {
+            loop_points.erase(data);
+        }
     }
 
     WaveformUnit unit{};
@@ -288,6 +303,9 @@ struct Voice {
     u32 repeats_left{};
     u32 byte_pos{};       // read position in current block
     u32 skip_remaining{}; // decoded samples to discard (encoder delay)
+    u32 loop_start{};     // AnyPS4: loop points in source samples, from the file's smpl chunk
+    u32 loop_end{};
+    u64 src_pos{};        // AnyPS4: source samples decoded since the last rewind
 
     // Decoder state
     void* at9_handle{};
@@ -348,11 +366,13 @@ const bool mastering_meters = std::getenv("ORBIS_NGS2_MASTERING_METERS") != null
 // AnyPS4: the extended sampler state (bytes consumed, block user data, waveform
 // pointer) is filled only with ORBIS_NGS2_SAMPLER_EXT=1; the fork leaves it zero.
 const bool sampler_ext_state = std::getenv("ORBIS_NGS2_SAMPLER_EXT") != nullptr;
-// AnyPS4: raw VAGp files are parsed by sceNgs2ParseWaveformData unless
-// ORBIS_NGS2_VAG_PARSE=0 (the fork reports its generic defaults for them).
+// AnyPS4: raw VAGp files are parsed by sceNgs2ParseWaveformData only with
+// ORBIS_NGS2_VAG_PARSE=1. By default they get the fork's generic report (stereo,
+// 48 kHz, size/4 samples), the behaviour this title's effect voices are known to
+// play with; the decoder takes rate and channels from the VAGp header either way.
 const bool vag_parse = [] {
     const char* v = std::getenv("ORBIS_NGS2_VAG_PARSE");
-    return v == nullptr || *v != '0';
+    return v != nullptr && *v == '1';
 }();
 // AnyPS4: a voice reuses its cached grain while it runs ahead of the wall
 // clock by more than this window. The fork's 8 ms is the default again now that
@@ -613,6 +633,7 @@ void RewindVoice(Voice& v) {
     v.repeats_left = v.blocks.empty() ? 0 : v.blocks.front().num_repeats;
     v.skip_remaining = v.blocks.empty() ? 0 : v.blocks.front().num_skip_samples;
     v.frac = 0.0f;
+    v.src_pos = 0;
 }
 
 bool IsAt9Format(const OrbisNgs2WaveformFormat& fmt) {
@@ -814,16 +835,27 @@ void ProduceGrain(Voice& v, u32 num_samples, float gain) {
         // encoder-delay samples at block starts.
         while (true) {
             if (v.frame_pos >= v.frame_samples) {
-                bool decoded = DecodeNextFrame(v);
+                bool decoded = v.loop_end == 0 || v.src_pos < v.loop_end ? DecodeNextFrame(v) : false;
+                if (decoded) {
+                    if (v.loop_end != 0 && v.src_pos + v.frame_samples > v.loop_end) {
+                        v.frame_samples = static_cast<u32>(std::max<u64>(v.loop_end - v.src_pos, 1));
+                    }
+                    v.src_pos += v.frame_samples;
+                }
                 if (!decoded) {
                     u64 total = 0;
                     for (const auto& b : v.blocks) {
                         total += b.size;
                     }
                     if (total > 1'000'000) {
-                        // Music track reached its end: loop.
+                        // Music track reached its end (or its loop end): go back
+                        // to the loop start, decoding and discarding up to it.
                         RewindVoice(v);
+                        v.skip_remaining += v.loop_start;
                         decoded = DecodeNextFrame(v);
+                        if (decoded) {
+                            v.src_pos += v.frame_samples;
+                        }
                     }
                 }
                 if (!decoded) {
@@ -1523,6 +1555,19 @@ s32 PS4_SYSV_ABI sceNgs2VoiceControl(OrbisNgs2Handle voiceHandle,
                         total_now += b.size;
                     }
                     voice.is_music = total_now > 1'000'000;
+                    {
+                        std::scoped_lock loop_lk{loop_mutex};
+                        const auto loop = loop_points.find(p->data);
+                        if (loop != loop_points.end() && voice.is_music) {
+                            voice.loop_start = loop->second.first;
+                            voice.loop_end = loop->second.second;
+                            LOG_INFO(Lib_Ngs2, "music voice {:#x} loops from sample {} to {}", voiceHandle, voice.loop_start,
+                                     voice.loop_end);
+                        } else {
+                            voice.loop_start = 0;
+                            voice.loop_end = 0;
+                        }
+                    }
                     if (was_empty && !voice.blocks.empty()) {
                         voice.repeats_left = voice.blocks.front().num_repeats;
                         voice.skip_remaining = voice.blocks.front().num_skip_samples;

@@ -366,7 +366,7 @@ ORBIS_SYSV_ABI s32 orbis_sceSaveDataMount(const Mount* mount, MountResult* resul
     }
     const fs::path hostPath = state.root / dirName;
     std::error_code error;
-    const bool exists = fs::is_directory(hostPath, error) && fs::exists(ParamFile(hostPath), error);
+    const bool exists = fs::is_directory(hostPath, error);
     if (!create && !createIfMissing && !exists) {
         Log("mount " + dirName + " mode " + std::to_string(mount->mountMode) + ": not found");
         return kErrorNotFound;
@@ -403,9 +403,18 @@ ORBIS_SYSV_ABI s32 orbis_sceSaveDataMount(const Mount* mount, MountResult* resul
         }
         Param param{};
         param.mtime = static_cast<std::int64_t>(std::time(nullptr));
-        SaveParam(hostPath, param);
+        if (!SaveParam(hostPath, param)) Log("could not write " + ParamFile(hostPath).string());
         std::ofstream blocks(BlocksFile(hostPath));
         blocks << (mount->blocks != 0 ? mount->blocks : kDefaultBlocks);
+    } else if (!fs::exists(ParamFile(hostPath), error)) {
+        Param param{};
+        param.mtime = static_cast<std::int64_t>(std::time(nullptr));
+        if (!SaveParam(hostPath, param)) Log("could not write " + ParamFile(hostPath).string());
+        if (!fs::exists(BlocksFile(hostPath), error)) {
+            std::ofstream blocks(BlocksFile(hostPath));
+            blocks << (mount->blocks != 0 ? mount->blocks : kDefaultBlocks);
+        }
+        Log("mount " + dirName + ": metadata of an existing save restored");
     }
     if (addAlias != nullptr) addAlias(mountPoint.c_str(), fs::absolute(hostPath, error).string().c_str());
     std::memset(result, 0, sizeof *result);
@@ -514,10 +523,10 @@ ORBIS_SYSV_ABI s32 orbis_sceSaveDataDirNameSearch(const SearchCond* cond, Search
     for (const auto& item : fs::directory_iterator(root, error)) {
         if (!item.is_directory(error)) continue;
         const std::string name = item.path().filename().string();
-        if (name.rfind("sce_", 0) == 0 || !fs::exists(ParamFile(item.path()), error)) continue;
+        if (name.rfind("sce_", 0) == 0 || !ValidDirName(name)) continue;
         if (!pattern.empty() && !Glob(pattern, name)) continue;
         Entry entry{name, {}, LoadBlocks(item.path()), 0};
-        LoadParam(item.path(), entry.param);
+        if (!LoadParam(item.path(), entry.param)) entry.param.mtime = static_cast<std::int64_t>(std::time(nullptr));
         const u64 used = UsedBlocks(item.path());
         entry.freeBlocks = entry.blocks > used ? entry.blocks - used : 0;
         entries.push_back(entry);
