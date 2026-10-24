@@ -7,8 +7,12 @@ On the console the executable sits at 0x400000 and every static address fits in
 fields and reassembles them later, which is harmless there and a crash here
 (CUSA02799 loading a save: a read of 0x478ed9b30, the low half of a real static
 address with a stray high half). Rebasing the image to 0x400000 and clearing
-DYNAMIC_BASE restores the console's address regime; the loader applies the
-.reloc section as usual.
+DYNAMIC_BASE would restore the console's address regime, but the relinked
+image does not start there (Windows reports 0xc0000005 before the entry
+point: the relinker's generated startup also carries addresses computed from
+its constant ImageBase that the .reloc section does not cover), so the
+installer leaves the base alone by default. Clearing DYNAMIC_BASE alone
+(--base 0x140000000) is known to work and gives a fixed, repeatable base.
 
 Usage: python tools/anyps4_rebase.py <exe> [--base 0x400000] [--keep-aslr]
 """

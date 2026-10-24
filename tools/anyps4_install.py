@@ -68,7 +68,7 @@ def main() -> int:
     parser.add_argument("--ninja", default=os.environ.get("ANYPS4_NINJA", ""), help="ninja executable (for a fresh configure)")
     parser.add_argument("--skip-build", action="store_true", help="only relink and generate; reuse the libraries already in <out>/libs")
     parser.add_argument("--pool", default=None, help="directory of <name>.json records for every installed title (default %%APPDATA%%/AnyPS4/registries); the libraries are generated for the union of them")
-    parser.add_argument("--image-base", type=lambda v: int(v, 0), default=0x400000, help="fixed image base for the relinked executable, ASLR off (default 0x400000 like the console; 0 keeps the relinker's 0x140000000 with ASLR)")
+    parser.add_argument("--image-base", type=lambda v: int(v, 0), default=0, help="experimental: rebase the relinked executable to this address with ASLR off (default 0: keep the relinker's 0x140000000 with ASLR; 0x400000 does not start on Windows yet, see GNM_PLAN.md 4.4.13)")
     args = parser.parse_args()
 
     game = args.game.resolve()
