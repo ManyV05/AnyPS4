@@ -391,12 +391,16 @@ const bool mastering_meters = std::getenv("ORBIS_NGS2_MASTERING_METERS") != null
 // pointer) is filled only with ORBIS_NGS2_SAMPLER_EXT=1; the fork leaves it zero.
 const bool sampler_ext_state = std::getenv("ORBIS_NGS2_SAMPLER_EXT") != nullptr;
 // AnyPS4: raw VAGp files are parsed by sceNgs2ParseWaveformData only with
-// ORBIS_NGS2_VAG_PARSE=1. By default they get the fork's generic report (stereo,
-// 48 kHz, size/4 samples), the behaviour this title's effect voices are known to
-// play with; the decoder takes rate and channels from the VAGp header either way.
+// ORBIS_NGS2_VAG_PARSE now defaults on: VAGp effect files report their true
+// HEVAG duration (units*28 samples, channels and rate from the header) so the
+// game's block math matches the ADPCM the decoder actually produces, instead of
+// the generic PCM report (size/4 samples) that could leave VAGp bytes to be
+// played as raw PCM ("rain" noise). Set ORBIS_NGS2_VAG_PARSE=0 to A/B the old
+// path. The decoder detects VAGp by magic and takes rate/channels from the
+// header either way.
 const bool vag_parse = [] {
     const char* v = std::getenv("ORBIS_NGS2_VAG_PARSE");
-    return v != nullptr && *v == '1';
+    return v == nullptr || *v != '0';
 }();
 // AnyPS4: a voice reuses its cached grain while it runs ahead of the wall
 // clock by more than this window. The fork's 8 ms is the default again now that
