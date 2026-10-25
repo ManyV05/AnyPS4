@@ -1826,6 +1826,24 @@ s32 PS4_SYSV_ABI sceNgs2VoiceControl(OrbisNgs2Handle voiceHandle,
                         total_now += b.size;
                     }
                     voice.is_music = IsMusicWaveform(voiceHandle, total_now);
+                    // AnyPS4: a VAGp block carries its real channel count (byte
+                    // 0x1E) and 44.1 kHz rate in its header. Read them now so the
+                    // first grain resamples and channelises from the file's true
+                    // format instead of the voice.format the game declares (often
+                    // 2ch/48000), which otherwise plays the 44.1 kHz source without
+                    // resampling and reads mono data as crossed stereo (the low
+                    // "48000hz-2ch-vag" noise seen in the dumps). The decoder's own
+                    // per-block header read stays as a fallback.
+                    if (voice.pcm_kind == Voice::PcmKind::Unknown && !voice.blocks.empty()) {
+                        const auto& b0 = voice.blocks.front();
+                        if (b0.size >= 48 && std::memcmp(b0.data, "VAGp", 4) == 0) {
+                            const u8* r = b0.data + 16;
+                            voice.pcm_kind = Voice::PcmKind::Vag;
+                            voice.vag_rate = (u32(r[0]) << 24) | (u32(r[1]) << 16) |
+                                             (u32(r[2]) << 8) | u32(r[3]);
+                            voice.vag_channels = std::max<u8>(b0.data[0x1E], 1);
+                        }
+                    }
                     {
                         std::scoped_lock loop_lk{loop_mutex};
                         const auto loop = loop_points.find(p->data);
