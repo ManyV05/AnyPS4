@@ -234,7 +234,8 @@ static int NextRand_nid_no_patch(std::uint32_t& state) {
 
 int APS5_VABI rand_nid_postfix() {
     std::lock_guard lock(g_randLock);
-    return NextRand_nid_no_patch(g_randState);
+    const int value = NextRand_nid_no_patch(g_randState) & 0x3fffffff;
+    return value > 0x3fffffdf ? 0x3fffffdf : value;
 }
 
 int APS5_VABI rand_r_nid_postfix(unsigned int* state) {
