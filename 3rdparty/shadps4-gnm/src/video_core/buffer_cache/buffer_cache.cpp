@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <cstdlib>
 #include <magic_enum/magic_enum.hpp>
 #include "common/alignment.h"
 #include "common/debug.h"
@@ -404,10 +405,22 @@ void BufferCache::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, 
     });
 }
 
+// AnyPS4: size up to which a read-only buffer is snapshotted into the stream buffer at record time
+// instead of using the page-tracked cached copy. The tracked copy missed CPU rewrites of the title's
+// camera and light constants (3D scene flicker, lights fixed to the camera); 4 MiB removes it.
+// ORBIS_GNM_UBO_STREAM_MAX=<bytes> overrides it (upstream used CACHING_PAGESIZE).
+static u64 StreamSnapshotLimit() {
+    static const u64 limit = [] {
+        const char* value = std::getenv("ORBIS_GNM_UBO_STREAM_MAX");
+        return value ? std::strtoull(value, nullptr, 0) : u64{4_MB};
+    }();
+    return limit;
+}
+
 std::pair<Buffer*, u32> BufferCache::ObtainBuffer(VAddr device_addr, u32 size, bool is_written,
                                                   bool is_texel_buffer, BufferId buffer_id) {
     // For read-only buffers use device local stream buffer to reduce renderpass breaks.
-    if (!is_written && size <= CACHING_PAGESIZE && !IsRegionGpuModified(device_addr, size)) {
+    if (!is_written && size <= StreamSnapshotLimit() && !IsRegionGpuModified(device_addr, size)) {
         const u64 offset = stream_buffer.Copy(device_addr, size, instance.UniformMinAlignment());
         return {&stream_buffer, offset};
     }

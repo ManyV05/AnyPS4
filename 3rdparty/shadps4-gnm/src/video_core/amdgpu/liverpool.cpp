@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <unordered_map>
 #include <cstdlib>
@@ -165,6 +166,71 @@ static u64 FenceKey(const PM4CmdWaitRegMem& wait) {
 static FenceWatchdog gfx_fence_watchdog;
 static FenceWatchdog asc_fence_watchdog;
 
+// AnyPS4 diagnostic: ORBIS_GNM_TRACE_ADDR=<hex guest address> logs every command-processor packet
+// whose destination covers that address (and every wait on it). The default is the per-frame
+// fence this title waits on without anything we emulate ever writing it; 0 turns the trace off.
+static u64 TraceAddress() {
+    static const u64 address = [] {
+        const char* value = std::getenv("ORBIS_GNM_TRACE_ADDR");
+        return value ? std::strtoull(value, nullptr, 16) : 0x292458008ULL;
+    }();
+    return address;
+}
+
+static void TraceWrite(const char* queue, const char* packet, u64 address, u64 bytes, u64 value,
+                       u32 select) {
+    const u64 target = TraceAddress();
+    if (target == 0 || target < address || target >= address + std::max<u64>(bytes, 1)) {
+        return;
+    }
+    static std::atomic<u64> count{0};
+    const u64 n = ++count;
+    if (n <= 400 || n % 1000 == 0) {
+        LOG_WARNING(Render_Vulkan,
+                    "FenceTrace #{} {} {} writes {:#x} (+{} bytes) value={:#x} select={} -> {:#x}",
+                    n, queue, packet, address, bytes, value, select, target);
+    }
+}
+
+static u64 TraceDataBytes(DataSelect select) {
+    return select == DataSelect::Data32Low ? 4 : 8;
+}
+
+// AnyPS4: an inline-data DMA into memory is a CP-visible write: the title issues one per frame and
+// then WAIT_REG_MEMs on the same dword. FillBuffer only updates the GPU-side copy, so the wait read
+// the old guest value until the watchdog forced it (every frame, 404 of 404 traced). Small fills
+// are therefore also published to guest memory, the way EVENT_WRITE_EOP fences are.
+static void PublishDmaFill(const PM4DmaData* dma_data) {
+    const u32 bytes = dma_data->NumBytes();
+    if (bytes == 0 || bytes > 16 || bytes % sizeof(u32) != 0) {
+        return;
+    }
+    auto* memory = Core::Memory::Instance();
+    auto* destination = dma_data->DstAddress<u8*>();
+    for (u32 offset = 0; offset < bytes; offset += sizeof(u32)) {
+        const u32 value = dma_data->data;
+        if (!memory->TryWriteBacking(destination + offset, &value, sizeof(u32))) {
+            std::memcpy(destination + offset, &value, sizeof(u32));
+        }
+    }
+}
+
+static void TraceWait(const char* queue, const PM4CmdWaitRegMem& wait) {
+    const u64 target = TraceAddress();
+    if (target == 0 || wait.mem_space.Value() != PM4CmdWaitRegMem::MemSpace::Memory ||
+        reinterpret_cast<u64>(wait.Address<const u32*>()) != target) {
+        return;
+    }
+    static std::atomic<u64> count{0};
+    const u64 n = ++count;
+    if (n <= 400 || n % 1000 == 0) {
+        LOG_WARNING(Render_Vulkan,
+                    "FenceTrace #{} {} WaitRegMem on {:#x} func={} ref={:#x} mask={:#x} current={:#x}",
+                    n, queue, target, static_cast<u32>(wait.function.Value()), wait.ref, wait.mask,
+                    *wait.Address<const u32*>());
+    }
+}
+
 static std::span<const u32> NextPacket(std::span<const u32> span, size_t offset) {
     if (offset > span.size()) {
         LOG_ERROR(
@@ -291,8 +357,17 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
         }
         case PM4ItOpcode::DumpConstRam: {
             const auto* dump_const = reinterpret_cast<const PM4DumpConstRam*>(header);
+            static std::atomic<u64> dump_count{0};
+            if (const u64 n = ++dump_count; n <= 40 || n % 2000 == 0) {
+                LOG_WARNING(Render_Vulkan, "CE DumpConstRam #{} -> {:#x} offset={:#x} size={}", n,
+                            reinterpret_cast<u64>(dump_const->Address<void*>()),
+                            dump_const->Offset(), dump_const->Size());
+            }
             memcpy(dump_const->Address<void*>(),
                    cblock.constants_heap.data() + dump_const->Offset(), dump_const->Size());
+            if (rasterizer) {
+                rasterizer->InvalidateMemory(dump_const->Address<VAddr>(), dump_const->Size());
+            }
             break;
         }
         case PM4ItOpcode::IncrementCeCounter: {
@@ -805,6 +880,11 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             }
             case PM4ItOpcode::EventWriteEos: {
                 const auto* event_eos = reinterpret_cast<const PM4CmdEventWriteEos*>(header);
+                TraceWrite("gfx", "EventWriteEos", reinterpret_cast<u64>(event_eos->Address()),
+                           event_eos->command == PM4CmdEventWriteEos::Command::GdsStore
+                               ? u64(event_eos->size.Value()) * 4
+                               : 4,
+                           event_eos->DataDWord(), u32(event_eos->command.Value()));
                 if (rasterizer) {
                     rasterizer->ProcessDownloadImages();
                 }
@@ -826,6 +906,9 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             }
             case PM4ItOpcode::EventWriteEop: {
                 const auto* event_eop = reinterpret_cast<const PM4CmdEventWriteEop*>(header);
+                TraceWrite("gfx", "EventWriteEop", reinterpret_cast<u64>(event_eop->Address<u32>()),
+                           TraceDataBytes(event_eop->data_sel.Value()), event_eop->DataQWord(),
+                           u32(event_eop->data_sel.Value()));
                 if (rasterizer) {
                     rasterizer->ProcessDownloadImages();
                 }
@@ -841,6 +924,8 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             }
             case PM4ItOpcode::DmaData: {
                 const auto* dma_data = reinterpret_cast<const PM4DmaData*>(header);
+                TraceWrite("gfx", "DmaData", dma_data->DstAddress<u64>(), dma_data->NumBytes(),
+                           dma_data->data, u32(dma_data->src_sel.Value()));
 #ifdef ANYPS4_HEADLESS
                 if (!rasterizer) {
                     HeadlessDmaData(dma_data);
@@ -863,6 +948,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                             dma_data->dst_sel == DmaDataDst::MemoryUsingL2)) {
                     rasterizer->FillBuffer(dma_data->DstAddress<VAddr>(), dma_data->NumBytes(),
                                            dma_data->data, false);
+                    PublishDmaFill(dma_data);
                 } else if (dma_data->src_sel == DmaDataSrc::Gds &&
                            (dma_data->dst_sel == DmaDataDst::Memory ||
                             dma_data->dst_sel == DmaDataDst::MemoryUsingL2)) {
@@ -886,6 +972,8 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 ASSERT(write_data->dst_sel.Value() == 2 || write_data->dst_sel.Value() == 5);
                 const u32 data_size = (header->type3.count.Value() - 2) * 4;
                 u64* address = write_data->Address<u64*>();
+                TraceWrite("gfx", "WriteData", reinterpret_cast<u64>(address), data_size,
+                           write_data->data[0], write_data->dst_sel.Value());
                 if (!write_data->wr_one_addr.Value()) {
                     std::memcpy(address, write_data->data, data_size);
                 } else {
@@ -895,6 +983,8 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             }
             case PM4ItOpcode::CopyData: {
                 const auto* copy_data = reinterpret_cast<const PM4CmdCopyData*>(header);
+                TraceWrite("gfx", "CopyData", copy_data->DstAddress<u64>(),
+                           copy_data->count_sel.Value() ? 8 : 4, 0, u32(copy_data->src_sel.Value()));
                 LOG_WARNING(Render,
                             "unhandled IT_COPY_DATA src_sel = {}, dst_sel = {}, "
                             "count_sel = {}, wr_confirm = {}, engine_sel = {}",
@@ -945,6 +1035,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 u64 wrm_spins = 0;
                 bool wrm_forced = false;
                 const u64 wrm_key = FenceKey(*wait_reg_mem);
+                TraceWait("gfx", *wait_reg_mem);
                 const bool wrm_never = gfx_fence_watchdog.NeverDelivered(wrm_key);
                 const auto wrm_start = std::chrono::steady_clock::now();
                 while (!wait_reg_mem->Test(regs.reg_array)) {
@@ -1156,6 +1247,8 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
         }
         case PM4ItOpcode::DmaData: {
             const auto* dma_data = reinterpret_cast<const PM4DmaData*>(header);
+            TraceWrite("asc", "DmaData", dma_data->DstAddress<u64>(), dma_data->NumBytes(),
+                       dma_data->data, u32(dma_data->src_sel.Value()));
 #ifdef ANYPS4_HEADLESS
             if (!rasterizer) {
                 HeadlessDmaData(dma_data);
@@ -1178,6 +1271,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
                         dma_data->dst_sel == DmaDataDst::MemoryUsingL2)) {
                 rasterizer->FillBuffer(dma_data->DstAddress<VAddr>(), dma_data->NumBytes(),
                                        dma_data->data, false);
+                PublishDmaFill(dma_data);
             } else if (dma_data->src_sel == DmaDataSrc::Gds &&
                        (dma_data->dst_sel == DmaDataDst::Memory ||
                         dma_data->dst_sel == DmaDataDst::MemoryUsingL2)) {
@@ -1297,6 +1391,8 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             const auto* write_data = reinterpret_cast<const PM4CmdWriteData*>(header);
             ASSERT(write_data->dst_sel.Value() == 2 || write_data->dst_sel.Value() == 5);
             const u32 data_size = (header->type3.count.Value() - 2) * 4;
+            TraceWrite("asc", "WriteData", reinterpret_cast<u64>(write_data->Address<void*>()),
+                       data_size, write_data->data[0], write_data->dst_sel.Value());
             if (!write_data->wr_one_addr.Value()) {
                 std::memcpy(write_data->Address<void*>(), write_data->data, data_size);
             } else {
@@ -1322,6 +1418,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             u64 wrm_spins = 0;
             bool wrm_forced = false;
             const u64 wrm_key = FenceKey(*wait_reg_mem);
+            TraceWait("asc", *wait_reg_mem);
             const bool wrm_never = asc_fence_watchdog.NeverDelivered(wrm_key);
             const auto wrm_start = std::chrono::steady_clock::now();
             while (!wait_reg_mem->Test(regs.reg_array)) {
@@ -1356,6 +1453,11 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
         }
         case PM4ItOpcode::ReleaseMem: {
             const auto* release_mem = reinterpret_cast<const PM4CmdReleaseMem*>(header);
+            TraceWrite("asc", "ReleaseMem", release_mem->Address<u64>(),
+                       release_mem->data_sel.Value() == DataSelect::GdsMemStore
+                           ? u64(release_mem->num_dw) * 4
+                           : TraceDataBytes(release_mem->data_sel.Value()),
+                       release_mem->DataQWord(), u32(release_mem->data_sel.Value()));
             if (rasterizer) {
                 rasterizer->ProcessDownloadImages();
             }
