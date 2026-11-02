@@ -166,29 +166,35 @@ static u64 FenceKey(const PM4CmdWaitRegMem& wait) {
 static FenceWatchdog gfx_fence_watchdog;
 static FenceWatchdog asc_fence_watchdog;
 
-// AnyPS4 diagnostic: ORBIS_GNM_TRACE_ADDR=<hex guest address> logs every command-processor packet
-// whose destination covers that address (and every wait on it). The default is the per-frame
-// fence this title waits on without anything we emulate ever writing it; 0 turns the trace off.
-static u64 TraceAddress() {
-    static const u64 address = [] {
+// AnyPS4 diagnostic: ORBIS_GNM_TRACE_ADDR=<hex guest address>[-<hex last address>] logs every
+// command-processor packet whose destination overlaps that address or range (and every wait on
+// it). Off unless set.
+static std::pair<u64, u64> TraceRange() {
+    static const std::pair<u64, u64> range = [] {
         const char* value = std::getenv("ORBIS_GNM_TRACE_ADDR");
-        return value ? std::strtoull(value, nullptr, 16) : 0x292458008ULL;
+        if (!value) {
+            return std::pair<u64, u64>{0, 0};
+        }
+        char* end = nullptr;
+        const u64 first = std::strtoull(value, &end, 16);
+        const u64 last = *end == '-' ? std::strtoull(end + 1, nullptr, 16) : first;
+        return std::pair<u64, u64>{first, last};
     }();
-    return address;
+    return range;
 }
 
 static void TraceWrite(const char* queue, const char* packet, u64 address, u64 bytes, u64 value,
                        u32 select) {
-    const u64 target = TraceAddress();
-    if (target == 0 || target < address || target >= address + std::max<u64>(bytes, 1)) {
+    const auto [first, last] = TraceRange();
+    if (first == 0 || last < address || first >= address + std::max<u64>(bytes, 1)) {
         return;
     }
     static std::atomic<u64> count{0};
     const u64 n = ++count;
     if (n <= 400 || n % 1000 == 0) {
         LOG_WARNING(Render_Vulkan,
-                    "FenceTrace #{} {} {} writes {:#x} (+{} bytes) value={:#x} select={} -> {:#x}",
-                    n, queue, packet, address, bytes, value, select, target);
+                    "FenceTrace #{} {} {} writes {:#x} (+{} bytes) value={:#x} select={} in {:#x}-{:#x}",
+                    n, queue, packet, address, bytes, value, select, first, last);
     }
 }
 
@@ -216,9 +222,10 @@ static void PublishDmaFill(const PM4DmaData* dma_data) {
 }
 
 static void TraceWait(const char* queue, const PM4CmdWaitRegMem& wait) {
-    const u64 target = TraceAddress();
-    if (target == 0 || wait.mem_space.Value() != PM4CmdWaitRegMem::MemSpace::Memory ||
-        reinterpret_cast<u64>(wait.Address<const u32*>()) != target) {
+    const auto [first, last] = TraceRange();
+    const u64 target = reinterpret_cast<u64>(wait.Address<const u32*>());
+    if (first == 0 || wait.mem_space.Value() != PM4CmdWaitRegMem::MemSpace::Memory ||
+        target < first || target > last) {
         return;
     }
     static std::atomic<u64> count{0};
@@ -925,7 +932,9 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             case PM4ItOpcode::DmaData: {
                 const auto* dma_data = reinterpret_cast<const PM4DmaData*>(header);
                 TraceWrite("gfx", "DmaData", dma_data->DstAddress<u64>(), dma_data->NumBytes(),
-                           dma_data->data, u32(dma_data->src_sel.Value()));
+                           dma_data->src_sel == DmaDataSrc::Data ? u64(dma_data->data)
+                                                                 : dma_data->SrcAddress<u64>(),
+                           u32(dma_data->src_sel.Value()));
 #ifdef ANYPS4_HEADLESS
                 if (!rasterizer) {
                     HeadlessDmaData(dma_data);
@@ -1248,7 +1257,9 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
         case PM4ItOpcode::DmaData: {
             const auto* dma_data = reinterpret_cast<const PM4DmaData*>(header);
             TraceWrite("asc", "DmaData", dma_data->DstAddress<u64>(), dma_data->NumBytes(),
-                       dma_data->data, u32(dma_data->src_sel.Value()));
+                       dma_data->src_sel == DmaDataSrc::Data ? u64(dma_data->data)
+                                                             : dma_data->SrcAddress<u64>(),
+                       u32(dma_data->src_sel.Value()));
 #ifdef ANYPS4_HEADLESS
             if (!rasterizer) {
                 HeadlessDmaData(dma_data);

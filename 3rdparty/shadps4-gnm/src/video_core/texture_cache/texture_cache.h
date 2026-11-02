@@ -122,8 +122,12 @@ public:
         Image& image = slot_images[image_id];
         TrackImage(image_id);
         TouchImage(image);
+        RevalidateImage(image);
         RefreshImage(image);
     }
+
+    /// Flags a small CPU-owned image whose guest memory changed without a tracked write.
+    void RevalidateImage(Image& image);
 
     /// Resolves overlap between existing cache image and pending merged image
     [[nodiscard]] std::tuple<ImageId, int, int> ResolveOverlap(const ImageInfo& info,

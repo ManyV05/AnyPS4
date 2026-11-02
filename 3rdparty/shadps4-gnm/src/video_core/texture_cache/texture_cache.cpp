@@ -5,6 +5,9 @@
 #include <half.hpp>
 #include <stb_image_write.h>
 #include <atomic>
+#include <cstdlib>
+#include <span>
+#include <fmt/ranges.h>
 #include <string_view>
 #include <xxhash.h>
 
@@ -719,6 +722,30 @@ ImageView& TextureCache::FindDepthTarget(ImageId image_id, const ImageDesc& desc
     return image.FindView(desc.view_info, false);
 }
 
+// AnyPS4: small images the GPU never writes are re-hashed at every use, so a CPU rewrite that the page
+// tracking missed still re-uploads them. The minimap's 64 KiB R8 masks live in a ring of buffers the
+// title fills after their first use; they were uploaded once, with stale data, and never refreshed.
+// ORBIS_GNM_REVALIDATE_MAX=<bytes> sets the largest image checked (0 turns it off).
+static u64 RevalidateLimit() {
+    static const u64 limit = [] {
+        const char* value = std::getenv("ORBIS_GNM_REVALIDATE_MAX");
+        return value ? std::strtoull(value, nullptr, 0) : u64{0x10000};
+    }();
+    return limit;
+}
+
+void TextureCache::RevalidateImage(Image& image) {
+    if (True(image.flags & (ImageFlagBits::Dirty | ImageFlagBits::GpuModified)) ||
+        image.content_hash == 0 || image.info.guest_size > RevalidateLimit() ||
+        image.info.num_samples > 1) {
+        return;
+    }
+    const u8* guest = std::bit_cast<u8*>(image.info.guest_address);
+    if (XXH3_64bits(guest, image.info.guest_size) != image.content_hash) {
+        image.flags |= ImageFlagBits::CpuDirty;
+    }
+}
+
 void TextureCache::RefreshImage(Image& image) {
     if (False(image.flags & ImageFlagBits::Dirty) || image.info.num_samples > 1) {
         return;
@@ -821,6 +848,29 @@ void TextureCache::RefreshImage(Image& image) {
         copy.bufferOffset += offset;
     }
 
+    static const std::pair<u64, u64> trace_range = [] {
+        const char* value = std::getenv("ORBIS_GNM_TRACE_ADDR");
+        if (!value) {
+            return std::pair<u64, u64>{0, 0};
+        }
+        char* end = nullptr;
+        const u64 first = std::strtoull(value, &end, 16);
+        return std::pair<u64, u64>{first, *end == '-' ? std::strtoull(end + 1, nullptr, 16) : first};
+    }();
+    if (trace_range.first != 0 && image.info.size.width == 256 && image.info.size.height == 256 &&
+        image.info.guest_address + image.info.guest_size > trace_range.first &&
+        image.info.guest_address <= trace_range.second) {
+        const u8* guest = std::bit_cast<u8*>(image.info.guest_address);
+        LOG_WARNING(Render_Vulkan,
+                    "ImageTrace upload {:#x} {}x{} {} flags={:#x} first16={:02x} hash={:#x}",
+                    image.info.guest_address, image.info.size.width, image.info.size.height,
+                    vk::to_string(image.info.pixel_format), static_cast<u32>(image.flags),
+                    fmt::join(std::span{guest, 16}, " "), XXH3_64bits(guest, image.info.guest_size));
+    }
+    if (False(image.flags & ImageFlagBits::GpuModified) && image.info.guest_size <= RevalidateLimit()) {
+        image.content_hash =
+            XXH3_64bits(std::bit_cast<u8*>(image.info.guest_address), image.info.guest_size);
+    }
     image.Upload(image_copies, buffer, offset);
 }
 
