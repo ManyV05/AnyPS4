@@ -1,39 +1,32 @@
-# About
+# AnyPS4: The Witch and the Hundred Knight: Revival Edition
 
-Tool for automatic executables porting to Linux and Windows.
+Dedicated port and runtime to play **The Witch and the Hundred Knight: Revival Edition (CUSA02799)** natively on Windows.
 
-Includes a [relinker](core/relinker) that converts executable to the target system's native format and implementations of [system prx libraries](core/libs/prx) suitable for dynamic linking. No emulation or separate runtime process.
+**Este proyecto fue desarrollado y probado ÚNICAMENTE para The Witch and the Hundred Knight: Revival Edition (CUSA02799).**
+**El objetivo principal es ofrecer una experiencia de ejecución nativa, estable y fluida dedicada a este juego en concreto.**
 
-[Usage](docs/user/USAGE.md), [Build instructions](docs/dev/BUILD.md), [Architecture](docs/dev/ARCHITECTURE.md), [Technical debt of the project](docs/dev/TechnicalDebt.md), [code style conventions](docs/dev/CONVENTIONS.md), [contributing](CONTRIBUTING.md)
+It is built on [AnyPS5](https://github.com/boykopovar/AnyPS5): a [relinker](core/relinker) converts the game's executable to a native Windows executable, and the system libraries it imports are provided as `.prx` libraries that the executable loads directly ([PS4 modules](core/libs/orbis), [shared libraries](core/libs/prx)). There is no emulation and no separate runtime process. Graphics go through a Vulkan renderer taken from [shadPS4](https://github.com/shadps4-emu/shadPS4) ([3rdparty/shadps4-gnm](3rdparty/shadps4-gnm)) and audio through a software NGS2 implementation ([3rdparty/shadps4-ngs2](3rdparty/shadps4-ngs2)).
 
-## Status
+[Usage](docs/user/USAGE.md), [Build instructions](docs/dev/BUILD.md), [Architecture](docs/dev/ARCHITECTURE.md), [Graphics and runtime notes](docs/dev/GNM_PLAN.md), [code style conventions](docs/dev/CONVENTIONS.md)
 
-[![libraries](https://boykopovar.github.io/AnyPS5/badge-libraries.svg)](https://boykopovar.github.io/AnyPS5/) [![shaders](https://boykopovar.github.io/AnyPS5/badge-shaders.svg)](https://boykopovar.github.io/AnyPS5/)
+## What it does for this game
 
-[![progress map](https://boykopovar.github.io/AnyPS5/progress.svg)](https://boykopovar.github.io/AnyPS5/)
-
-<sub>* System libraries: percentage of the functions known to the project so far (declared in [core/libs/prx](core/libs/prx)), not of every PS5 system function. The total grows as more functions are declared.</sub>
-
-[List of verified games](docs/user/COMPATIBILITY.md)
-
-Dreaming Sarah (2D platformer) runs at a stable 60 fps on a GTX 1050 Ti / i5-7500 3.4GHz.
+- Relinks the game's `eboot.bin` and generates the Orbis libraries the title imports.
+- Save data, English language, keyboard and XInput pad input, audio output and a launcher with the settings the game needs.
+- Diagnostics for this game: a circular audio recorder (`dump_now.txt` in the working directory writes the last 30 s of audio and a snapshot of the NGS2 voices), `ORBIS_AUDIO_DUMP`, and the renderer traces described in [GNM_PLAN](docs/dev/GNM_PLAN.md).
 
 Unsupported or unexpected states strictly throw `std::runtime_error`. `what()` is printed to stderr and the process terminates.
 
-The [shader recompiler](core/shader/recompiler/Recompiler.cpp) successfully produces SPIR-V (validated via [Spirv-Tools](3rdparty/SPIRV-Tools) when built with `ANYPS5_ENABLE_SPIRV_TOOLS`).
-
-## Compatibility
-
-See the [game compatibility list](docs/user/COMPATIBILITY.md) for tested games and known issues.
-
 ## Input mapping
 
-SDL-mapped game controllers are supported, including analog sticks and triggers. Keyboard and mouse controls can be configured with an `anyps5-input.ini` file. See [input mapping](docs/user/INPUT_MAPPING.md) for the supported devices and configuration format.
+Keyboard keys are mapped in the launcher and saved in `anyps4/pad.ini` beside the executable (`ORBIS_PAD_CONFIG` points to another file). An XInput controller in slot 1 is used when connected. Details are in [GNM_PLAN](docs/dev/GNM_PLAN.md).
 
 ## Disclaimer
 
-This project is intended for interoperability, research, preservation, and compatibility purposes. It does not include, distribute, or require copyrighted software, firmware, cryptographic keys, or proprietary libraries. Users are responsible for ensuring that any binaries used with this project are obtained and used in accordance with applicable laws and their respective license terms.
+Este proyecto fue desarrollado y probado ÚNICAMENTE para The Witch and the Hundred Knight: Revival Edition (CUSA02799). El objetivo principal es ofrecer una experiencia de ejecución nativa, estable y fluida dedicada a este juego en concreto. Otros títulos no están soportados ni se han probado.
+
+This project is intended for interoperability, research, preservation, and compatibility purposes. It does not include, distribute, or require copyrighted software, firmware, cryptographic keys, or proprietary libraries. The installer links the game folder you provide and never copies its files. Users are responsible for ensuring that any binaries used with this project are obtained and used in accordance with applicable laws and their respective license terms.
 
 ## License
 
-This project is licensed under the GNU General Public License version 2 only.
+This project is licensed under the GNU General Public License version 2 only. It includes code from AnyPS5 and shadPS4, which keep their own copyright notices.
