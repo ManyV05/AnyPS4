@@ -2,8 +2,7 @@
 
 Dedicated port and runtime to play **The Witch and the Hundred Knight: Revival Edition (CUSA02799)** natively on Windows.
 
-**Este proyecto fue desarrollado y probado ÚNICAMENTE para The Witch and the Hundred Knight: Revival Edition (CUSA02799).**
-**El objetivo principal es ofrecer una experiencia de ejecución nativa, estable y fluida dedicada a este juego en concreto.**
+**This project was developed and tested ONLY for The Witch and the Hundred Knight: Revival Edition (CUSA02799). The primary goal is to offer a native, stable, and smooth execution experience dedicated exclusively to this game.**
 
 It is built on [AnyPS5](https://github.com/boykopovar/AnyPS5): a [relinker](core/relinker) converts the game's executable to a native Windows executable, and the system libraries it imports are provided as `.prx` libraries that the executable loads directly ([PS4 modules](core/libs/orbis), [shared libraries](core/libs/prx)). There is no emulation and no separate runtime process. Graphics go through a Vulkan renderer taken from [shadPS4](https://github.com/shadps4-emu/shadPS4) ([3rdparty/shadps4-gnm](3rdparty/shadps4-gnm)) and audio through a software NGS2 implementation ([3rdparty/shadps4-ngs2](3rdparty/shadps4-ngs2)).
 
@@ -23,7 +22,7 @@ Keyboard keys are mapped in the launcher and saved in `anyps4/pad.ini` beside th
 
 ## Disclaimer
 
-Este proyecto fue desarrollado y probado ÚNICAMENTE para The Witch and the Hundred Knight: Revival Edition (CUSA02799). El objetivo principal es ofrecer una experiencia de ejecución nativa, estable y fluida dedicada a este juego en concreto. Otros títulos no están soportados ni se han probado.
+This project was developed and tested ONLY for The Witch and the Hundred Knight: Revival Edition (CUSA02799). The primary goal is to offer a native, stable, and smooth execution experience dedicated exclusively to this game. Other titles are not supported and have not been tested.
 
 This project is intended for interoperability, research, preservation, and compatibility purposes. It does not include, distribute, or require copyrighted software, firmware, cryptographic keys, or proprietary libraries. The installer links the game folder you provide and never copies its files. Users are responsible for ensuring that any binaries used with this project are obtained and used in accordance with applicable laws and their respective license terms.
 
