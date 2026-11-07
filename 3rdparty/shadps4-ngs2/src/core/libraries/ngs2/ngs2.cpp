@@ -313,6 +313,7 @@ struct Voice {
     uintptr_t patch_dest{}; // mastering voice this voice is routed into
     u64 decoded_samples{};
     u32 starved_renders{}; // consecutive render calls with no data (streaming underrun)
+    float matrix_rms{-1.0f}; // root of the sum of squares of the last volume matrix; negative until one arrives
 
     // Playback cursor
     u32 block_index{};
@@ -1771,6 +1772,18 @@ s32 PS4_SYSV_ABI sceNgs2SystemRender(OrbisNgs2Handle systemHandle,
                         gain = music_floor;
                     }
                 }
+                // AnyPS4: ORBIS_NGS2_SPATIAL=<reference> applies the title's volume matrix to effect voices. The
+                // title sends distance attenuation, pan and fades through it for sounds like the totem hum; effects
+                // played at their port volume only. The matrix is spread over 8 speakers, so its root of squares is
+                // taken as the loudness and divided by the reference (a full-level matrix, about 0.2 in the titles'
+                // traces): louder than that is not boosted, quieter is attenuated. Unset or 0 turns it off.
+                static const float spatial_reference = [] {
+                    const char* value = std::getenv("ORBIS_NGS2_SPATIAL");
+                    return value != nullptr ? static_cast<float>(std::atof(value)) : 0.0f;
+                }();
+                if (spatial_reference > 0.0f && !voice.is_music && voice.matrix_rms >= 0.0f) {
+                    gain *= std::min(voice.matrix_rms / spatial_reference, 1.0f);
+                }
                 ProduceGrain(voice, num_samples, std::clamp(gain, 0.0f, 4.0f));
                 voice.clock_samples += num_samples;
             }
@@ -2061,6 +2074,13 @@ s32 PS4_SYSV_ABI sceNgs2VoiceControl(OrbisNgs2Handle voiceHandle,
                                  p->numLevels > 6 ? p->aLevel[6] : 0.0f,
                                  p->numLevels > 7 ? p->aLevel[7] : 0.0f);
                     }
+                    float square_sum = 0.0f;
+                    for (u32 l = 0; l < std::min(p->numLevels, 16u); ++l) {
+                        if (std::isfinite(p->aLevel[l])) {
+                            square_sum += p->aLevel[l] * p->aLevel[l];
+                        }
+                    }
+                    voice.matrix_rms = std::sqrt(square_sum);
                     voice.matrix_gain = std::clamp(peak, 0.0f, 4.0f);
                 }
             }
