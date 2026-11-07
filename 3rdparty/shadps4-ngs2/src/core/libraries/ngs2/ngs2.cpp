@@ -424,6 +424,7 @@ std::unordered_map<uintptr_t, std::array<float, 2>> bus_peak;
 // track at the volume it reached, unless another music voice is already
 // playing or it had played for a while: then the Stop is a real track change.
 bool ShouldHoldMusic(uintptr_t voice_handle, const struct Voice& voice);
+bool OtherMusicPlaying(uintptr_t voice_handle);
 
 bool IsMasteringVoice(uintptr_t voice_handle) {
     const auto it = rack_ids.find(voice_handle & ~0xFFFFFull);
@@ -433,6 +434,20 @@ u64 render_seq{};                                            // SystemRender cal
 
 uintptr_t RackOfVoice(uintptr_t voice_handle) {
     return voice_handle & ~0xFFFFFull;
+}
+
+// AnyPS4: another music track is already audible, so a Stop or Kill of this one is a track change and
+// is honoured instead of held. The held track would otherwise keep playing at its peak volume next to
+// the new one (the title-screen music under the house music) when the title starts the new track
+// before it stops the old one.
+bool OtherMusicPlaying(uintptr_t voice_handle) {
+    for (const auto& [other_handle, other] : voice_registry) {
+        if (other_handle != voice_handle && other.is_music && other.playing && other.has_data && !other.stop_requested &&
+            other.volume > 0.01f) {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool ShouldHoldMusic(uintptr_t voice_handle, const Voice& voice) {
@@ -656,6 +671,16 @@ void LogRackUsage() {
 // ducking permanently.
 bool IsSyntheticHandle(uintptr_t handle) {
     return (handle >> 32) == 0x4E530000u;
+}
+
+// AnyPS4: a voice that is not playing, not waiting for its Play and not paused has finished, and a
+// finished voice reports no state flags. The title's SoundManager returns a voice to its pool when
+// (stateFlags & 0xF) == 0 ("PlayEnd To Free Handle"); reporting INUSE|ACTIVE for a finished voice
+// kept every effect voice busy for ever and emptied the 232-voice effect pool after 232 sounds.
+// playing (not the starvation-aware playing_now) is tested so a streaming voice that is briefly out
+// of data is not released. Mastering buses keep their own reporting.
+bool IsFinishedVoice(uintptr_t voice_handle, const Voice& v) {
+    return !IsMasteringVoice(voice_handle) && !v.playing && !v.pending_play && !v.paused;
 }
 
 std::atomic<u64> empty_state_queries{};
@@ -1187,8 +1212,8 @@ void ProduceGrain(Voice& v, u32 num_samples, float gain) {
                     }
                     v.src_pos += v.frame_samples;
                 }
-                if (!decoded && v.is_music) {
-                    // Music track reached its end (or its loop end): go back to
+                if (!decoded && (v.is_music || v.loop_end != 0)) {
+                    // Music track (or any voice with loop points) reached its end (or its loop end): go back to
                     // the loop start. AT9 superframes decode independently, so
                     // seek to the one holding the loop start and discard only
                     // the remainder, instead of decoding from the first sample.
@@ -1732,15 +1757,17 @@ s32 PS4_SYSV_ABI sceNgs2SystemRender(OrbisNgs2Handle systemHandle,
                 float gain = voice.stop_requested && !music_hold ? voice.peak_volume : voice.volume;
                 if (voice.is_music) {
                     gain *= voice.matrix_gain;
-                    // Workaround: the game demands near-silence from music tracks
-                    // it started (root cause of its decision still unidentified).
-                    // Floor the music volume so the soundtrack stays audible; real
-                    // track changes still swap via voice retirement.
+                    // Workaround, off by default now: the game demanded near-silence from
+                    // music tracks it started, and this floored them so the soundtrack stayed
+                    // audible. That came from the voice state flags reporting a finished
+                    // voice as busy; with the flags fixed the game fades tracks for real, and
+                    // the floor played a faded-out track at 0.6 over the next one (the level
+                    // music under the town music). ORBIS_NGS2_MUSIC_FLOOR=0.6 restores it.
                     static const float music_floor = [] {
                         const char* value = std::getenv("ORBIS_NGS2_MUSIC_FLOOR");
-                        return value != nullptr ? static_cast<float>(std::atof(value)) : 0.6f;
+                        return value != nullptr ? static_cast<float>(std::atof(value)) : 0.0f;
                     }();
-                    if (music_hold && gain < 0.25f) {
+                    if (music_floor > 0.0f && music_hold && gain < 0.25f) {
                         gain = music_floor;
                     }
                 }
@@ -1937,11 +1964,14 @@ s32 PS4_SYSV_ABI sceNgs2VoiceControl(OrbisNgs2Handle voiceHandle,
                     {
                         std::scoped_lock loop_lk{loop_mutex};
                         const auto loop = loop_points.find(p->data);
-                        if (loop != loop_points.end() && voice.is_music) {
+                        // A loop that starts after the beginning is a track with an intro, whatever its
+                        // size: the town music is 855 KB, under the music threshold, and played once.
+                        // Loops from sample 0 are on one-shot voice lines and are left alone.
+                        if (loop != loop_points.end() && (voice.is_music || loop->second.first > 0)) {
                             voice.loop_start = loop->second.first;
                             voice.loop_end = loop->second.second;
-                            LOG_INFO(Lib_Ngs2, "music voice {:#x} loops from sample {} to {}", voiceHandle, voice.loop_start,
-                                     voice.loop_end);
+                            LOG_INFO(Lib_Ngs2, "{} voice {:#x} loops from sample {} to {}", voice.is_music ? "music" : "looping",
+                                     voiceHandle, voice.loop_start, voice.loop_end);
                         } else {
                             voice.loop_start = 0;
                             voice.loop_end = 0;
@@ -1954,6 +1984,14 @@ s32 PS4_SYSV_ABI sceNgs2VoiceControl(OrbisNgs2Handle voiceHandle,
                             voice.pending_play = false;
                             voice.playing = true;
                             voice.paused = false;
+                            if (voice.is_music) {
+                                for (auto& [other_handle, other] : voice_registry) {
+                                    if (other_handle != voiceHandle && other.stop_requested) {
+                                        other.playing = false;
+                                        other.stop_requested = false;
+                                    }
+                                }
+                            }
                         }
                     } else if (!was_empty && voice.playing) {
                         // Stream top-up while playing: part of the lifecycle trace.
@@ -2123,7 +2161,8 @@ s32 PS4_SYSV_ABI sceNgs2VoiceControl(OrbisNgs2Handle voiceHandle,
             case EventKill:
                 // The game also aborts music via Kill; suppress it the same way
                 // as Stop (the next music track's Play retires this voice).
-                if (voice.playing && voice.is_music && (music_hold || ShouldHoldMusic(voiceHandle, voice))) {
+                if (voice.playing && voice.is_music && !OtherMusicPlaying(voiceHandle) &&
+                    (music_hold || ShouldHoldMusic(voiceHandle, voice))) {
                     voice.stop_requested = true;
                     LOG_INFO(Lib_Ngs2, "holding music voice {:#x} through Kill at {:.1f}s (volume {:.3f})", voiceHandle,
                              double(voice.decoded_samples) / 48000.0, voice.peak_volume);
@@ -2151,7 +2190,8 @@ s32 PS4_SYSV_ABI sceNgs2VoiceControl(OrbisNgs2Handle voiceHandle,
                 for (const auto& b : voice.blocks) {
                     total_bytes += b.size;
                 }
-                if (voice.playing && voice.is_music && (music_hold || ShouldHoldMusic(voiceHandle, voice))) {
+                if (voice.playing && voice.is_music && !OtherMusicPlaying(voiceHandle) &&
+                    (music_hold || ShouldHoldMusic(voiceHandle, voice))) {
                     voice.stop_requested = true;
                     LOG_INFO(Lib_Ngs2, "holding music voice {:#x} through Stop at {:.1f}s (volume {:.3f})", voiceHandle,
                              double(voice.decoded_samples) / 48000.0, voice.peak_volume);
@@ -2260,8 +2300,10 @@ s32 PS4_SYSV_ABI sceNgs2VoiceGetState(OrbisNgs2Handle voiceHandle, OrbisNgs2Voic
             }
             const bool playing_now = v.playing && v.has_data && v.starved_renders < 2;
             outState->stateFlags =
-                NGS2_VOICE_STATE_FLAG_INUSE | NGS2_VOICE_STATE_FLAG_ACTIVE |
-                (playing_now ? NGS2_VOICE_STATE_FLAG_PLAYING : 0);
+                IsFinishedVoice(voiceHandle, v)
+                    ? 0
+                    : NGS2_VOICE_STATE_FLAG_INUSE | NGS2_VOICE_STATE_FLAG_ACTIVE |
+                          (playing_now ? NGS2_VOICE_STATE_FLAG_PLAYING : 0);
             u32* words = reinterpret_cast<u32*>(outState);
             if (stateSize >= 24) {
                 const float height = playing_now ? 1.0f : 0.0f;
@@ -2328,8 +2370,10 @@ s32 PS4_SYSV_ABI sceNgs2VoiceGetStateFlags(OrbisNgs2Handle voiceHandle, u32* out
             const bool playing_now = mastering_meters && IsMasteringVoice(voiceHandle)
                                          ? it->second.playing
                                          : it->second.playing && it->second.has_data && it->second.starved_renders < 2;
-            *outStateFlags = NGS2_VOICE_STATE_FLAG_INUSE | NGS2_VOICE_STATE_FLAG_ACTIVE |
-                             (playing_now ? NGS2_VOICE_STATE_FLAG_PLAYING : 0);
+            *outStateFlags = IsFinishedVoice(voiceHandle, it->second)
+                                 ? 0
+                                 : NGS2_VOICE_STATE_FLAG_INUSE | NGS2_VOICE_STATE_FLAG_ACTIVE |
+                                       (playing_now ? NGS2_VOICE_STATE_FLAG_PLAYING : 0);
         } else if (IsSyntheticHandle(voiceHandle)) {
             *outStateFlags = 0;
             ++empty_state_queries;
