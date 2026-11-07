@@ -734,6 +734,31 @@ static u64 RevalidateLimit() {
     return limit;
 }
 
+// AnyPS4 diagnostic (no behaviour change): the guest memory of an image changed and the page
+// tracking never reported it. Logs what the host, the guest arena and the page manager say about
+// each 4 KiB page of the image: "<host protect>:<write watchers>/<read watchers>".
+void TextureCache::LogDesync(Image& image) {
+    static std::atomic<u64> count{0};
+    const u64 n = ++count;
+    if (n > 300 && n % 500 != 0) {
+        return;
+    }
+    std::string pages;
+    const VAddr first_page = PageManager::GetPageAddr(image.info.guest_address);
+    const VAddr end = image.info.guest_address + image.info.guest_size;
+    for (VAddr page = first_page; page < end && pages.size() < 400; page += 0x1000) {
+        u32 write_watchers = 0;
+        u32 read_watchers = 0;
+        tracker.WatcherInfo(page, write_watchers, read_watchers);
+        pages += fmt::format(" {:x}:{}/{}", Core::GuestPageProtection(page), write_watchers, read_watchers);
+    }
+    LOG_WARNING(Render_Vulkan,
+                "DesyncTrace #{} image {:#x} {}x{} {} flags={:#x} tracked={} [{:#x}-{:#x}] pages{} | first page: {}", n,
+                image.info.guest_address, image.info.size.width, image.info.size.height,
+                vk::to_string(image.info.pixel_format), static_cast<u32>(image.flags), image.IsTracked(),
+                image.track_addr, image.track_addr_end, pages, Core::DescribeGuestPage(first_page));
+}
+
 void TextureCache::RevalidateImage(Image& image) {
     if (True(image.flags & (ImageFlagBits::Dirty | ImageFlagBits::GpuModified)) ||
         image.content_hash == 0 || image.info.guest_size > RevalidateLimit() ||
@@ -742,6 +767,7 @@ void TextureCache::RevalidateImage(Image& image) {
     }
     const u8* guest = std::bit_cast<u8*>(image.info.guest_address);
     if (XXH3_64bits(guest, image.info.guest_size) != image.content_hash) {
+        LogDesync(image);
         image.flags |= ImageFlagBits::CpuDirty;
     }
 }

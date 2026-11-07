@@ -15,6 +15,7 @@
 #include <mutex>
 #include <thread>
 #include <windows.h>
+#include "prx/libc/include/GuestArena.hpp"
 
 namespace AnyPs4 {
 struct ReadbackFrame {
@@ -65,7 +66,17 @@ size_t AddressSpace::SystemReservedVirtualSize() {
     return ReservedSize;
 }
 
+namespace {
+
+// AnyPS4: TryWriteBacking opens a protected page, copies and restores the protection it read; a
+// page-manager protect landing in between was undone by the restore, leaving a read-only page with
+// no watchers behind. Both take this lock (recursive: a fault inside the copy may re-enter Protect).
+std::recursive_mutex protection_mutex;
+
+} // namespace
+
 void AddressSpace::Protect(VAddr virtual_addr, u64 size, MemoryPermission perms) {
+    std::lock_guard lock{protection_mutex};
     DWORD protect = PAGE_NOACCESS;
     const bool read = True(perms & MemoryPermission::Read);
     const bool write = True(perms & MemoryPermission::Write);
@@ -93,6 +104,40 @@ void AddressSpace::Protect(VAddr virtual_addr, u64 size, MemoryPermission perms)
         }
         cursor = region_end;
     }
+}
+
+u32 GuestPageProtection(VAddr address) {
+    MEMORY_BASIC_INFORMATION info{};
+    return VirtualQuery(reinterpret_cast<const void*>(address), &info, sizeof info) == sizeof info
+               ? (info.State == MEM_COMMIT ? info.Protect : 0xFFFFFFFFu)
+               : 0xFFFFFFFEu;
+}
+
+std::string DescribeGuestPage(VAddr address) {
+    MEMORY_BASIC_INFORMATION info{};
+    if (VirtualQuery(reinterpret_cast<const void*>(address), &info, sizeof info) != sizeof info) {
+        return "VirtualQuery failed";
+    }
+    std::uint32_t protection = 0;
+    std::uint32_t aliases = 0;
+    std::uint32_t pins = 0;
+    std::uint32_t host_writes = 0;
+    bool armed = false;
+    const bool shared = GuestArena::GuestArenaDescribePage_nid_postfix(address, &protection, &aliases, &pins,
+                                                                        &host_writes, &armed);
+    char text[256];
+    if (shared) {
+        std::snprintf(text, sizeof text,
+                      "state=%#lx protect=%#lx alloc_protect=%#lx type=%#lx | arena shared view: intended=%#x aliases=%u pins=%u "
+                      "host_writes=%u armed=%d",
+                      info.State, info.Protect, info.AllocationProtect, info.Type, protection, aliases, pins,
+                      host_writes, armed ? 1 : 0);
+    } else {
+        std::snprintf(text, sizeof text,
+                      "state=%#lx protect=%#lx alloc_protect=%#lx type=%#lx | arena: not a shared view",
+                      info.State, info.Protect, info.AllocationProtect, info.Type);
+    }
+    return text;
 }
 
 namespace {
@@ -158,6 +203,7 @@ bool MemoryManager::TryWriteBacking(void* address, const void* data, u64 size) {
     auto* cursor = static_cast<u8*>(address);
     const auto* source = static_cast<const u8*>(data);
     while (size != 0) {
+        std::lock_guard lock{protection_mutex};
         if (!QueryRegion(reinterpret_cast<VAddr>(cursor), info) || !Committed(info)) {
             return false;
         }

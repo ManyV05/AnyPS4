@@ -1286,8 +1286,16 @@ bool Rasterizer::IsMapped(VAddr addr, u64 size) {
     }
     const auto range = decltype(mapped_ranges)::interval_type::right_open(addr, addr + size);
 
-    Common::RecursiveSharedLock lock{mapped_ranges_mutex};
-    return boost::icl::contains(mapped_ranges, range);
+    {
+        Common::RecursiveSharedLock lock{mapped_ranges_mutex};
+        if (!mapped_ranges.empty()) {
+            return boost::icl::contains(mapped_ranges, range);
+        }
+    }
+    // AnyPS4: nothing registers GPU mappings (MapMemory has no caller) and the title's memory is the
+    // process's own, so every committed page is GPU visible. Without this the CPU-write faults of the
+    // tracked pages were never reported to the caches.
+    return Core::Memory::Instance()->IsValidMapping(addr, size);
 }
 
 void Rasterizer::MapMemory(VAddr addr, u64 size) {

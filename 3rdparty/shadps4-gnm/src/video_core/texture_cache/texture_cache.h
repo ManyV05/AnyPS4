@@ -129,6 +129,9 @@ public:
     /// Flags a small CPU-owned image whose guest memory changed without a tracked write.
     void RevalidateImage(Image& image);
 
+    /// Diagnostics for an image whose guest memory changed without a tracked write.
+    void LogDesync(Image& image);
+
     /// Resolves overlap between existing cache image and pending merged image
     [[nodiscard]] std::tuple<ImageId, int, int> ResolveOverlap(const ImageInfo& info,
                                                                BindingType binding,

@@ -43,6 +43,9 @@ public:
     template <bool track, bool is_read = false>
     void UpdatePageWatchersForRegion(VAddr base_addr, RegionBits& mask) const;
 
+    /// Diagnostics: the write and read watchers the manager believes the 4 KiB page holds.
+    void WatcherInfo(VAddr addr, u32& write_watchers, u32& read_watchers) const;
+
     /// Returns page aligned address.
     static constexpr VAddr GetPageAddr(VAddr addr) {
         return Common::AlignDown(addr, PM_PAGE_SIZE);

@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <atomic>
 #include <boost/container/small_vector.hpp>
 #include "common/assert.h"
 #include "common/debug.h"
@@ -88,6 +89,7 @@ struct PageManager::Impl {
     static constexpr size_t NUM_ADDRESS_PAGES = 1ULL << (40 - PM_PAGE_BITS);
     static constexpr size_t NUM_ADDRESS_LOCKS = NUM_ADDRESS_PAGES / PAGES_PER_LOCK;
     inline static Vulkan::Rasterizer* rasterizer;
+    inline static Impl* instance;
 #ifdef ENABLE_USERFAULTFD
     Impl(Vulkan::Rasterizer* rasterizer_) {
         rasterizer = rasterizer_;
@@ -183,6 +185,7 @@ struct PageManager::Impl {
 #else
     Impl(Vulkan::Rasterizer* rasterizer_) {
         rasterizer = rasterizer_;
+        instance = this;
 
         // Should be called first.
         constexpr auto priority = std::numeric_limits<u32>::min();
@@ -207,10 +210,37 @@ struct PageManager::Impl {
         impl.Protect(address, size, perms);
     }
 
+    // AnyPS4: a handled write fault must leave the page writable, or the faulting thread retries the
+    // same store forever. InvalidateMemory only releases the watchers the caches know about; a page
+    // that still has others stays read-only. Such pages are opened and logged with the watchers the
+    // manager believed they had.
+    void EnsureWritable(VAddr addr) {
+        constexpr u32 WritableMask = 0x04 | 0x08 | 0x40 | 0x80;
+        const VAddr page_addr = addr & ~(PM_PAGE_SIZE - 1);
+        const u32 protection = Core::GuestPageProtection(page_addr);
+        if (protection == 0xFFFFFFFFu || protection == 0xFFFFFFFEu || (protection & WritableMask) != 0) {
+            return;
+        }
+        const PageState& state = cached_pages[page_addr >> PM_PAGE_BITS];
+        static std::atomic<u64> forced{0};
+        const u64 n = ++forced;
+        if (n <= 200 || n % 1000 == 0) {
+            LOG_WARNING(Render,
+                        "FaultTrace #{} page {:#x} still protect={:#x} after a handled write fault; "
+                        "write_watchers={} read_watchers={}; forcing PAGE_READWRITE",
+                        n, page_addr, protection, state.num_write_watchers, state.num_read_watchers);
+        }
+        Protect(page_addr, PM_PAGE_SIZE, Core::MemoryPermission::ReadWrite);
+    }
+
     static bool GuestFaultSignalHandler(void* context, void* fault_address) {
         const auto addr = reinterpret_cast<VAddr>(fault_address);
         if (Common::IsWriteError(context)) {
-            return rasterizer->InvalidateMemory(addr, 8);
+            const bool handled = rasterizer->InvalidateMemory(addr, 8);
+            if (handled && instance != nullptr) {
+                instance->EnsureWritable(addr);
+            }
+            return handled;
         } else {
             return rasterizer->ReadMemory(addr, 8);
         }
@@ -368,6 +398,13 @@ PageManager::PageManager(Vulkan::Rasterizer* rasterizer_)
     : impl{std::make_unique<Impl>(rasterizer_)} {}
 
 PageManager::~PageManager() = default;
+
+void PageManager::WatcherInfo(VAddr addr, u32& write_watchers, u32& read_watchers) const {
+    const size_t page = addr >> PM_PAGE_BITS;
+    std::scoped_lock lk{impl->locks[page / PAGES_PER_LOCK]};
+    write_watchers = impl->cached_pages[page].num_write_watchers;
+    read_watchers = impl->cached_pages[page].num_read_watchers;
+}
 
 void PageManager::OnGpuMap(VAddr address, size_t size) {
     impl->OnMap(address, size);

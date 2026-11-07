@@ -3,6 +3,7 @@
 #pragma once
 
 #include <cstddef>
+#include <string>
 #include "common/enum.h"
 #include "common/types.h"
 
@@ -24,5 +25,9 @@ public:
     size_t SystemReservedVirtualSize();
     void Protect(VAddr virtual_addr, u64 size, MemoryPermission perms);
 };
+
+/// AnyPS4 diagnostics: the page's host protection and the guest arena's view of it.
+u32 GuestPageProtection(VAddr address);
+std::string DescribeGuestPage(VAddr address);
 
 } // namespace Core

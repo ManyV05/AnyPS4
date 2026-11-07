@@ -216,6 +216,19 @@ public:
         return true;
     }
 
+    bool Describe(std::uintptr_t address, std::uint32_t* protection, std::uint32_t* aliases, std::uint32_t* pins, std::uint32_t* hostWrites, bool* armed) {
+        std::lock_guard lock(mutex);
+        const auto found = views.find(address & ~(pageBytes - 1));
+        if (found == views.end()) return false;
+        const auto& view = found->second;
+        *protection = view.protection;
+        *aliases = static_cast<std::uint32_t>(view.page->aliases.size());
+        *pins = view.page->pins;
+        *hostWrites = view.hostWrites;
+        *armed = view.armed;
+        return true;
+    }
+
     bool Collect(std::uintptr_t address, std::size_t bytes, void** pages, std::size_t* count, bool clear) {
         std::lock_guard lock(mutex);
         const auto capacity = *count;

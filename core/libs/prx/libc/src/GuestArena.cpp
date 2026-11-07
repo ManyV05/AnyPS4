@@ -334,6 +334,10 @@ bool GuestArenaProtection_nid_postfix(std::uintptr_t address, std::uint32_t* pro
     return WindowsMappings::Get().Protection(address, protection);
 }
 
+bool GuestArenaDescribePage_nid_postfix(std::uintptr_t address, std::uint32_t* protection, std::uint32_t* aliases, std::uint32_t* pins, std::uint32_t* hostWrites, bool* armed) {
+    return WindowsMappings::Get().Describe(address, protection, aliases, pins, hostWrites, armed);
+}
+
 bool GuestArenaCollectWrites_nid_postfix(std::uintptr_t address, std::size_t bytes, void** pages, std::size_t* count, bool clear) {
     return WindowsMappings::Get().Collect(address, bytes, pages, count, clear);
 }
