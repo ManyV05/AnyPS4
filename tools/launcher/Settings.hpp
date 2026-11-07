@@ -25,7 +25,7 @@ struct Settings {
     bool diagnostics = false;
     int bgmVolume = 70;
     int mainVolume = 100;
-    int musicFloor = 40;
+    int musicFloor = 0;
     bool xinput = true;
     std::array<int, 24> keys{};
 };

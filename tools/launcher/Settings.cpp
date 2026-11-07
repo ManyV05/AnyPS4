@@ -85,7 +85,9 @@ Settings LoadSettings() {
     settings.diagnostics = ReadInt(file, L"diagnostics", 0) != 0;
     settings.bgmVolume = ReadInt(file, L"bgm_volume", 70);
     settings.mainVolume = ReadInt(file, L"main_volume", 100);
-    settings.musicFloor = ReadInt(file, L"music_floor", 40);
+    // The key changed with the default: launcher.ini files written when the floor defaulted to 40 keep
+    // that value under "music_floor", and reading it would switch the overlapping-music workaround back on.
+    settings.musicFloor = ReadInt(file, L"music_floor_v2", 0);
     settings.xinput = ReadInt(file, L"xinput", 1) != 0;
     std::size_t count = 0;
     const anyps4::PadBinding* bindings = anyps4::PadBindings(count);
@@ -118,7 +120,7 @@ void SaveSettings(const Settings& settings) {
     WriteInt(file, L"diagnostics", settings.diagnostics ? 1 : 0);
     WriteInt(file, L"bgm_volume", settings.bgmVolume);
     WriteInt(file, L"main_volume", settings.mainVolume);
-    WriteInt(file, L"music_floor", settings.musicFloor);
+    WriteInt(file, L"music_floor_v2", settings.musicFloor);
     WriteInt(file, L"xinput", settings.xinput ? 1 : 0);
     std::size_t count = 0;
     const anyps4::PadBinding* bindings = anyps4::PadBindings(count);
