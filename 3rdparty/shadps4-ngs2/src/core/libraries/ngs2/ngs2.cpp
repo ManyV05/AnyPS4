@@ -1772,14 +1772,15 @@ s32 PS4_SYSV_ABI sceNgs2SystemRender(OrbisNgs2Handle systemHandle,
                         gain = music_floor;
                     }
                 }
-                // AnyPS4: ORBIS_NGS2_SPATIAL=<reference> applies the title's volume matrix to effect voices. The
+                // AnyPS4: the title's volume matrix is applied to effect voices (ORBIS_NGS2_SPATIAL=<reference>
+                // changes the reference, 0 turns it off). The
                 // title sends distance attenuation, pan and fades through it for sounds like the totem hum; effects
                 // played at their port volume only. The matrix is spread over 8 speakers, so its root of squares is
                 // taken as the loudness and divided by the reference (a full-level matrix, about 0.2 in the titles'
-                // traces): louder than that is not boosted, quieter is attenuated. Unset or 0 turns it off.
+                // traces): louder than that is not boosted, quieter is attenuated.
                 static const float spatial_reference = [] {
                     const char* value = std::getenv("ORBIS_NGS2_SPATIAL");
-                    return value != nullptr ? static_cast<float>(std::atof(value)) : 0.0f;
+                    return value != nullptr ? static_cast<float>(std::atof(value)) : 0.2f;
                 }();
                 if (spatial_reference > 0.0f && !voice.is_music && voice.matrix_rms >= 0.0f) {
                     gain *= std::min(voice.matrix_rms / spatial_reference, 1.0f);
