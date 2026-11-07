@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.20)
 
 add_executable(anyps4_launcher WIN32
         ${CMAKE_CURRENT_SOURCE_DIR}/Main.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Bundle.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Settings.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Process.cpp)
 target_compile_features(anyps4_launcher PRIVATE cxx_std_20)

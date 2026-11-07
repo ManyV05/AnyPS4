@@ -9,6 +9,7 @@
 #include <thread>
 #include <vector>
 
+#include "Bundle.hpp"
 #include "PadKeyNames.hpp"
 #include "Process.hpp"
 #include "Settings.hpp"
@@ -227,6 +228,17 @@ void Install() {
     launcher::SaveSettings(g_settings);
     g_installing = true;
     EnableWindow(Control(kIdInstall), FALSE);
+    std::wstring bundle;
+    if (launcher::BundleAvailable(bundle)) {
+        AppendLog(L"Installing from the standalone package in " + bundle);
+        const std::wstring game = g_settings.gameDirectory;
+        const std::wstring install = g_settings.installDirectory;
+        std::thread([bundle, game, install] {
+            const int exitCode = launcher::InstallFromBundle(bundle, game, install, PostLog);
+            PostMessageW(g_window, kMessageInstallDone, static_cast<WPARAM>(exitCode), 0);
+        }).detach();
+        return;
+    }
     std::wstring command = launcher::Quote(g_settings.python) + L" " + launcher::Quote(g_settings.repoRoot + L"\\tools\\anyps4_install.py") + L" --game " +
                            launcher::Quote(g_settings.gameDirectory) + L" --out " + launcher::Quote(g_settings.installDirectory) + L" --build-dir " +
                            launcher::Quote(g_settings.buildDirectory) + L" --cmake " + launcher::Quote(g_settings.cmake);
@@ -296,8 +308,13 @@ void CreateControls() {
     UpdateSliderLabels();
     g_log = Create(L"EDIT", L"", WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL, 12, 482, 783, 200, kIdLog);
     AppendLog(L"AnyPS4 launcher. Settings: " + launcher::SettingsPath());
-    AppendLog(L"Repository " + g_settings.repoRoot + L", build directory " + g_settings.buildDirectory +
-              (g_settings.shadps4Checkout.empty() ? L" (no shadPS4 checkout configured: functions keep NID names)" : L", shadPS4 " + g_settings.shadps4Checkout));
+    std::wstring bundle;
+    if (launcher::BundleAvailable(bundle)) {
+        AppendLog(L"Standalone package: " + bundle + L" (Install needs no compiler, Python or CMake).");
+    } else {
+        AppendLog(L"Repository " + g_settings.repoRoot + L", build directory " + g_settings.buildDirectory +
+                  (g_settings.shadps4Checkout.empty() ? L" (no shadPS4 checkout configured: functions keep NID names)" : L", shadPS4 " + g_settings.shadps4Checkout));
+    }
 }
 
 void AssignKey(int key) {
@@ -327,7 +344,10 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
             if (!folder.empty()) {
                 SetWindowTextW(Control(kIdGame), folder.c_str());
                 if (WindowText(Control(kIdInstallDir)).empty()) {
-                    const std::wstring suggestion = (std::filesystem::path(g_settings.repoRoot).parent_path() / (L"AnyPS4-" + std::filesystem::path(folder).filename().wstring())).wstring();
+                    std::wstring bundle;
+                    const std::wstring name = std::filesystem::path(folder).filename().wstring();
+                    const std::wstring suggestion = launcher::BundleAvailable(bundle) ? (std::filesystem::path(bundle) / name).wstring()
+                                                                                       : (std::filesystem::path(g_settings.repoRoot).parent_path() / (L"AnyPS4-" + name)).wstring();
                     SetWindowTextW(Control(kIdInstallDir), suggestion.c_str());
                 }
             }

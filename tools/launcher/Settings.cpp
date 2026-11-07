@@ -53,6 +53,14 @@ void WriteInt(const std::wstring& file, const wchar_t* key, int value) {
 }  // namespace
 
 std::wstring SettingsPath() {
+    // ANYPS4_CONFIG_DIR keeps the settings somewhere else (a portable folder, or a test that must not touch the real ones).
+    wchar_t overrideDirectory[MAX_PATH];
+    const DWORD overrideLength = GetEnvironmentVariableW(L"ANYPS4_CONFIG_DIR", overrideDirectory, MAX_PATH);
+    if (overrideLength > 0 && overrideLength < MAX_PATH) {
+        std::error_code error;
+        std::filesystem::create_directories(overrideDirectory, error);
+        return (std::filesystem::path(overrideDirectory) / L"launcher.ini").wstring();
+    }
     wchar_t appData[MAX_PATH];
     if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, 0, appData))) {
         const std::filesystem::path directory = std::filesystem::path(appData) / L"AnyPS4";

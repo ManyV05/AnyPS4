@@ -100,8 +100,8 @@ def main() -> int:
         return 4
     if args.image_base:
         from anyps4_rebase import rebase
-        old_base, new_base = rebase(out / (name + ".exe"), args.image_base)
-        log(f"  image base {old_base:#x} -> {new_base:#x}, ASLR off")
+        old_base, new_base, relocated = rebase(out / (name + ".exe"), args.image_base)
+        log(f"  image base {old_base:#x} -> {new_base:#x}, {relocated} pointers relocated, ASLR off")
 
     log("== 2/4 generating the runtime libraries' sources")
     pool = Path(args.pool) if args.pool else Path(os.environ.get("APPDATA", str(REPO))) / "AnyPS4" / "registries"
