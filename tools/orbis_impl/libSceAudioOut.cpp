@@ -8,7 +8,9 @@
 #include <condition_variable>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -125,12 +127,70 @@ struct Dump {
     }
 };
 
+struct FlightRing {
+    std::vector<u8> bytes;
+    std::size_t head = 0;
+    std::size_t filled = 0;
+    u32 freq = 0;
+    u32 channels = 0;
+    bool isFloat = false;
+    s32 handle = 0;
+
+    void Append(const void* data, std::size_t size) {
+        if (bytes.empty()) return;
+        const u8* source = static_cast<const u8*>(data);
+        if (size >= bytes.size()) {
+            source += size - bytes.size();
+            size = bytes.size();
+        }
+        const std::size_t first = std::min(size, bytes.size() - head);
+        std::memcpy(bytes.data() + head, source, first);
+        std::memcpy(bytes.data(), source + first, size - first);
+        head = (head + size) % bytes.size();
+        filled = std::min(filled + size, bytes.size());
+    }
+
+    std::vector<u8> Linear() const {
+        std::vector<u8> out(filled);
+        const std::size_t start = (head + bytes.size() - filled) % bytes.size();
+        const std::size_t first = std::min(filled, bytes.size() - start);
+        std::memcpy(out.data(), bytes.data() + start, first);
+        std::memcpy(out.data() + first, bytes.data(), filled - first);
+        return out;
+    }
+};
+
+struct Flight {
+    bool enabled = std::getenv("ORBIS_AUDIO_RING") == nullptr || std::atoi(std::getenv("ORBIS_AUDIO_RING")) != 0;
+    double seconds = std::getenv("ORBIS_AUDIO_RING_SECONDS") != nullptr ? std::atof(std::getenv("ORBIS_AUDIO_RING_SECONDS")) : 30.0;
+    u32 portMask = 1u << 2;
+    std::array<FlightRing, kMaxPorts + 1> ports{};
+    FlightRing mix;
+    std::chrono::steady_clock::time_point nextCheck{};
+    bool primed = false;
+    long long handledStamp = -1;
+
+    Flight() {
+        if (const char* list = std::getenv("ORBIS_AUDIO_RING_PORTS")) {
+            portMask = 0;
+            for (const char* cursor = list; *cursor != 0;) {
+                char* end = nullptr;
+                const long handle = std::strtol(cursor, &end, 10);
+                if (end == cursor) break;
+                if (handle >= 1 && handle <= static_cast<long>(kMaxPorts)) portMask |= 1u << handle;
+                cursor = *end == ',' ? end + 1 : end;
+            }
+        }
+    }
+};
+
 struct State {
     std::mutex lock;
     std::condition_variable drained;
     std::array<Port, kMaxPorts> ports{};
     Mixer mixer;
     Dump dump;
+    Flight flight;
 };
 
 void WriteWavHeader(FILE* file, u32 freq, u32 channels, bool isFloat, u64 dataBytes) {
@@ -229,6 +289,138 @@ void DumpMixBlock(State& state, const std::vector<s16>& buffer) {
     if ((mixer.dumpFrames / kMixFrames) % 64 == 0) {
         WriteWavHeader(mixer.dump, kMixFrequency, 2, false, mixer.dumpFrames * 2 * sizeof(s16));
     }
+}
+
+void RecordPortChunk(State& state, const Port& port, s32 handle, const void* data) {
+    Flight& flight = state.flight;
+    if (!flight.enabled || handle < 1 || handle > static_cast<s32>(kMaxPorts) || !(flight.portMask & (1u << handle))) return;
+    FlightRing& ring = flight.ports[static_cast<std::size_t>(handle)];
+    const std::size_t sampleBytes = port.isFloat ? 4 : 2;
+    if (ring.bytes.empty()) {
+        ring.freq = port.freq;
+        ring.channels = port.sourceChannels;
+        ring.isFloat = port.isFloat;
+        ring.handle = handle;
+        ring.bytes.assign(static_cast<std::size_t>(flight.seconds * port.freq) * port.sourceChannels * sampleBytes, 0);
+    }
+    ring.Append(data, static_cast<std::size_t>(port.samples) * port.sourceChannels * sampleBytes);
+}
+
+void RecordMixBlock(State& state, const std::vector<s16>& buffer) {
+    Flight& flight = state.flight;
+    if (!flight.enabled) return;
+    if (flight.mix.bytes.empty()) {
+        flight.mix.freq = kMixFrequency;
+        flight.mix.channels = 2;
+        flight.mix.isFloat = false;
+        flight.mix.bytes.assign(static_cast<std::size_t>(flight.seconds * kMixFrequency) * 2 * sizeof(s16), 0);
+    }
+    flight.mix.Append(buffer.data(), buffer.size() * sizeof(s16));
+}
+
+void WriteFlightRing(const std::filesystem::path& folder, const FlightRing& ring, const std::vector<u8>& data, FILE* levels) {
+    if (data.empty()) return;
+    char file[96];
+    if (ring.handle != 0) {
+        std::snprintf(file, sizeof file, "port%d-%uch-%s-%uhz.wav", ring.handle, ring.channels, ring.isFloat ? "f32" : "s16", ring.freq);
+    } else {
+        std::snprintf(file, sizeof file, "mix-2ch-s16-48000hz.wav");
+    }
+    FILE* out = std::fopen((folder / file).string().c_str(), "wb");
+    if (out == nullptr) return;
+    WriteWavHeader(out, ring.freq, ring.channels, ring.isFloat, data.size());
+    std::fwrite(data.data(), 1, data.size(), out);
+    std::fclose(out);
+    const std::size_t sampleBytes = ring.isFloat ? 4 : 2;
+    const std::size_t frames = data.size() / (sampleBytes * ring.channels);
+    std::fprintf(levels, "== %s: %zu frames = %.2f s\nsec  rms(all)  peak  nonfinite  rms per channel\n", file, frames, static_cast<double>(frames) / ring.freq);
+    for (std::size_t second = 0; second * ring.freq < frames; ++second) {
+        const std::size_t begin = second * ring.freq;
+        const std::size_t end = std::min(frames, begin + ring.freq);
+        std::vector<double> square(ring.channels, 0.0);
+        double peak = 0.0;
+        u64 nonFinite = 0;
+        for (std::size_t frame = begin; frame < end; ++frame) {
+            for (u32 channel = 0; channel < ring.channels; ++channel) {
+                double value;
+                const std::size_t index = frame * ring.channels + channel;
+                if (ring.isFloat) {
+                    float sample;
+                    std::memcpy(&sample, data.data() + index * 4, 4);
+                    if (!std::isfinite(sample)) {
+                        ++nonFinite;
+                        continue;
+                    }
+                    value = sample;
+                } else {
+                    s16 sample;
+                    std::memcpy(&sample, data.data() + index * 2, 2);
+                    value = sample / 32768.0;
+                }
+                square[channel] += value * value;
+                peak = std::max(peak, std::fabs(value));
+            }
+        }
+        double total = 0.0;
+        for (const double channelSquare : square) total += channelSquare;
+        const double count = static_cast<double>(end - begin);
+        std::fprintf(levels, "%3zu  %.4f  %.4f  %llu ", second, std::sqrt(total / (count * ring.channels)), peak, static_cast<unsigned long long>(nonFinite));
+        for (const double channelSquare : square) std::fprintf(levels, " %.4f", std::sqrt(channelSquare / count));
+        std::fprintf(levels, "\n");
+    }
+    std::fprintf(levels, "\n");
+}
+
+void PollFlightTrigger(State& state) {
+    Flight& flight = state.flight;
+    if (!flight.enabled) return;
+    const auto now = std::chrono::steady_clock::now();
+    if (now < flight.nextCheck) return;
+    flight.nextCheck = now + std::chrono::seconds(1);
+    const char* custom = std::getenv("ORBIS_AUDIO_TRIGGER");
+    std::error_code error;
+    const auto written = std::filesystem::last_write_time(custom != nullptr ? custom : "dump_now.txt", error);
+    const long long stamp = error ? -1 : static_cast<long long>(written.time_since_epoch().count());
+    if (!flight.primed) {
+        flight.primed = true;
+        flight.handledStamp = stamp;
+        return;
+    }
+    if (stamp == -1 || stamp == flight.handledStamp) return;
+    flight.handledStamp = stamp;
+    std::vector<std::pair<FlightRing, std::vector<u8>>> copies;
+    for (const FlightRing& ring : flight.ports) {
+        if (!ring.bytes.empty() && ring.filled != 0) {
+            FlightRing meta;
+            meta.freq = ring.freq;
+            meta.channels = ring.channels;
+            meta.isFloat = ring.isFloat;
+            meta.handle = ring.handle;
+            copies.emplace_back(std::move(meta), ring.Linear());
+        }
+    }
+    if (!flight.mix.bytes.empty() && flight.mix.filled != 0) {
+        FlightRing meta;
+        meta.freq = flight.mix.freq;
+        meta.channels = flight.mix.channels;
+        meta.isFloat = flight.mix.isFloat;
+        meta.handle = 0;
+        copies.emplace_back(std::move(meta), flight.mix.Linear());
+    }
+    const char* rootEnv = std::getenv("ORBIS_AUDIO_FLIGHT_DIR");
+    const std::filesystem::path folder = std::filesystem::path(rootEnv != nullptr ? rootEnv : "anyps4/audio_dumps") / ("flight-" + std::to_string(stamp));
+    std::fprintf(stderr, "[AudioOut] flight recorder triggered: writing %zu rings to %s\n", copies.size(), folder.string().c_str());
+    std::fflush(stderr);
+    std::thread([folder, copies = std::move(copies)]() {
+        std::error_code createError;
+        std::filesystem::create_directories(folder, createError);
+        FILE* levels = std::fopen((folder / "audio_levels.txt").string().c_str(), "wb");
+        if (levels == nullptr) return;
+        for (const auto& [ring, data] : copies) WriteFlightRing(folder, ring, data, levels);
+        std::fclose(levels);
+        std::fprintf(stderr, "[AudioOut] flight recorder: wrote %s\n", folder.string().c_str());
+        std::fflush(stderr);
+    }).detach();
 }
 
 State& Global() {
@@ -423,6 +615,8 @@ void MixerThread() {
             mixer.clipped += clipped;
             mixer.peak = std::max(mixer.peak, peak);
             DumpMixBlock(state, buffer);
+            RecordMixBlock(state, buffer);
+            PollFlightTrigger(state);
         }
     }
 }
@@ -499,6 +693,7 @@ s32 Output(s32 handle, const void* data) {
     if (port->queue.size() >= limit) port->queue.erase(port->queue.begin(), port->queue.begin() + static_cast<std::ptrdiff_t>(port->samples * 2));
     if (state.dump.firstOutput.time_since_epoch().count() == 0) state.dump.firstOutput = std::chrono::steady_clock::now();
     DumpPortChunk(state, *port, handle, data);
+    RecordPortChunk(state, *port, handle, data);
     ConvertChunk(*port, data);
     ++port->outputs;
     Report(state, *port, handle);

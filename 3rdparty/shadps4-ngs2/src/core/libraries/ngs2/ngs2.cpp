@@ -660,6 +660,95 @@ bool IsSyntheticHandle(uintptr_t handle) {
 
 std::atomic<u64> empty_state_queries{};
 
+// AnyPS4 flight recorder companion: when the trigger file of the audio dump (dump_now.txt, or
+// ORBIS_AUDIO_TRIGGER) is touched, write the racks and voices as they are into the same flight
+// folder libSceAudioOut uses (named after the trigger's modification stamp). Called from the render
+// with engine_mutex held.
+void WriteEngineSnapshot(const std::filesystem::path& file) {
+    std::FILE* out = std::fopen(file.string().c_str(), "wb");
+    if (out == nullptr) {
+        return;
+    }
+    std::fprintf(out, "NGS2 snapshot at render #%llu: %llu plays, %llu stops, %llu kills, %llu empty state queries, %zu voices registered\n\n",
+                 static_cast<unsigned long long>(render_seq), static_cast<unsigned long long>(evt_plays.load()),
+                 static_cast<unsigned long long>(evt_stops.load()), static_cast<unsigned long long>(evt_kills.load()),
+                 static_cast<unsigned long long>(empty_state_queries.load()), voice_registry.size());
+    std::unordered_map<uintptr_t, u32> active;
+    for (const auto& [handle, voice] : voice_registry) {
+        if (voice.playing || voice.pending_play) {
+            ++active[RackOfVoice(handle)];
+        }
+    }
+    for (const auto& [rack, id] : rack_ids) {
+        const auto limit_it = rack_limits.find(rack);
+        const u32 limit = limit_it != rack_limits.end() ? limit_it->second : 0;
+        const auto used_it = active.find(rack);
+        const u32 used = used_it != active.end() ? used_it->second : 0;
+        std::fprintf(out, "rack %#llx id %u: %u / %u voices active%s\n", static_cast<unsigned long long>(rack), id, used, limit,
+                     limit != 0 && used >= limit ? "  <- FULL" : "");
+    }
+    std::vector<uintptr_t> handles;
+    handles.reserve(voice_registry.size());
+    for (const auto& entry : voice_registry) {
+        handles.push_back(entry.first);
+    }
+    std::sort(handles.begin(), handles.end());
+    u32 unused = 0;
+    std::fprintf(out, "\nvoices (handle rack-id: flags | format | gains | cursor):\n");
+    for (const uintptr_t handle : handles) {
+        const Voice& v = voice_registry.at(handle);
+        if (!v.known && !v.playing && !v.pending_play && !v.has_data) {
+            ++unused;
+            continue;
+        }
+        const auto id_it = rack_ids.find(RackOfVoice(handle));
+        std::fprintf(out,
+                     "%#llx r%u: %s%s%s%s%s%s%s | type %u %uch %uHz pcm %d adds %u blocks %zu | vol %.3f mat %.3f peak %.3f pitch %.3f patch %#llx | "
+                     "decoded %.2fs src %llu starved %u block %u repeats %u loop %u-%u at9err %u\n",
+                     static_cast<unsigned long long>(handle), id_it != rack_ids.end() ? id_it->second : 0u,
+                     v.known ? "known " : "", v.playing ? "PLAYING " : "", v.paused ? "paused " : "", v.has_data ? "data " : "",
+                     v.pending_play ? "PENDING " : "", v.stop_requested ? "stop_req " : "", v.is_music ? "music " : "",
+                     v.format.waveformType, v.format.numChannels, v.format.sampleRate, static_cast<int>(v.pcm_kind), v.add_calls,
+                     v.blocks.size(), v.volume, v.matrix_gain, v.peak_volume, v.pitch, static_cast<unsigned long long>(v.patch_dest),
+                     static_cast<double>(v.decoded_samples) / 48000.0, static_cast<unsigned long long>(v.src_pos), v.starved_renders,
+                     v.block_index, v.repeats_left, v.loop_start, v.loop_end, v.at9_errors);
+    }
+    std::fprintf(out, "\n%u voices never configured\n\nmastering bus peaks (handle left right):\n", unused);
+    for (const auto& [handle, peak] : bus_peak) {
+        std::fprintf(out, "%#llx %.4f %.4f\n", static_cast<unsigned long long>(handle), peak[0], peak[1]);
+    }
+    std::fclose(out);
+}
+
+void PollSnapshotTrigger() {
+    static std::chrono::steady_clock::time_point next_check{};
+    static bool primed = false;
+    static long long handled = -1;
+    const auto now = std::chrono::steady_clock::now();
+    if (now < next_check) {
+        return;
+    }
+    next_check = now + std::chrono::seconds(1);
+    const char* custom = std::getenv("ORBIS_AUDIO_TRIGGER");
+    std::error_code error;
+    const auto written = std::filesystem::last_write_time(custom != nullptr ? custom : "dump_now.txt", error);
+    const long long stamp = error ? -1 : static_cast<long long>(written.time_since_epoch().count());
+    if (!primed) {
+        primed = true;
+        handled = stamp;
+        return;
+    }
+    if (stamp == -1 || stamp == handled) {
+        return;
+    }
+    handled = stamp;
+    const char* root = std::getenv("ORBIS_AUDIO_FLIGHT_DIR");
+    const std::filesystem::path folder =
+        std::filesystem::path(root != nullptr ? root : "anyps4/audio_dumps") / ("flight-" + std::to_string(stamp));
+    std::filesystem::create_directories(folder, error);
+    WriteEngineSnapshot(folder / "ngs2_state.txt");
+}
+
 void ResetVoiceDecoder(Voice& v) {
     if (v.at9_handle) {
         Atrac9ReleaseHandle(v.at9_handle);
@@ -1549,6 +1638,7 @@ s32 PS4_SYSV_ABI sceNgs2SystemRender(OrbisNgs2Handle systemHandle,
     }
     std::scoped_lock lk{engine_mutex};
     const u64 seq = ++render_seq;
+    PollSnapshotTrigger();
     if (trace_all && seq % 2000 < 3) {
         std::string buffers;
         for (u32 i = 0; i < numBufferInfo; ++i) {
