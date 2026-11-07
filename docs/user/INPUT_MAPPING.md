@@ -1,33 +1,46 @@
-# Controller, keyboard and mouse input
+# Keyboard and controller input
 
-AnyPS5 accepts SDL-mapped game controllers as well as its built-in keyboard and mouse bindings. Xbox-style controllers and PlayStation controllers recognized by SDL use the standard PS button layout; sticks and analog triggers are passed through, and controllers can be connected or disconnected while the game is running. The first recognized controller is used. AnyPS5 uses its built-in keyboard and mouse bindings when no configuration file is present. To change selected keyboard and mouse bindings, create `anyps5-input.ini` beside the generated game executable. Set `ANYPS5_INPUT_CONFIG` to use a file at another path.
+AnyPS4 reads the keyboard and an XInput controller for The Witch and the Hundred Knight: Revival Edition (CUSA02799). The keyboard mapping is edited in the launcher, which saves it as `anyps4/pad.ini` beside the generated game executable. Set `ORBIS_PAD_CONFIG` to use a file at another path.
 
-For an Xbox-layout controller, A/B/X/Y map to Cross/Circle/Square/Triangle, LB/RB map to L1/R1, and LT/RT map to analog L2/R2. Start maps to Options. D-pad and stick-click buttons are supported. On a PlayStation controller, the touchpad click button is forwarded; finger touch coordinates are not implemented.
+## XInput controller
 
-Each non-empty line has the form `Action = Type:Value`. Action names are case-insensitive. A `#` or `;` starts a comment. The first line for an action replaces its built-in bindings; later lines for the same action add alternate inputs. Duplicate entries for the same action are ignored. Actions omitted from the file keep their built-in bindings. UTF-8 files with or without a byte-order mark are supported.
+The controller in slot 1 is used while it is connected; a disconnected controller is checked again every two seconds. A/B/X/Y map to Cross/Circle/Square/Triangle, LB/RB to L1/R1, and the triggers to L2/R2 (digital above a threshold of 30, with their analog value). Start maps to Options, Back to the touch pad, and the thumb clicks to L3/R3. The sticks use a dead zone of 7849. DirectInput is not implemented.
 
-Supported input sources are:
+`xinput=0` in `pad.ini` turns the controller off.
 
-- `KEY:Return`, `KEY:Space`, or another key name accepted by SDL.
-- `MOUSE:Left`, `MOUSE:Middle`, `MOUSE:Right`, `MOUSE:X1`, or `MOUSE:X2`.
-- `WHEEL:Up` or `WHEEL:Down` for pad buttons.
+## Keyboard mapping
 
-Game-controller bindings are enabled automatically and are not affected by keyboard or mouse overrides in this file.
+`pad.ini` is a standard INI file with a `[pad]` section. Each line is `action=KEY`. The actions are `cross`, `circle`, `square`, `triangle`, `up`, `down`, `left`, `right`, `l1`, `r1`, `l2`, `r2`, `l3`, `r3`, `options`, `touchpad`, `ls_up`, `ls_down`, `ls_left`, `ls_right`, `rs_up`, `rs_down`, `rs_left` and `rs_right`.
 
-Supported actions are `Cross`, `Circle`, `Triangle`, `Square`, `L1`, `R1`, `L2`, `R2`, `L3`, `R3`, `Options`, `Up`, `Right`, `Down`, `Left`, `LeftStickLeft`, `LeftStickRight`, `LeftStickUp`, `LeftStickDown`, `RightStickLeft`, `RightStickRight`, `RightStickUp`, `RightStickDown`, `TouchLeft`, `TouchRight`, `ToggleMouse`, and `ToggleFullscreen`.
+A key is a letter or digit (`Z`, `1`), a name from [tools/orbis_impl/PadKeyNames.hpp](../../tools/orbis_impl/PadKeyNames.hpp) (`UP`, `RETURN`, `SPACE`, `LSHIFT`, `F5`, `NUMPAD4`, `COMMA`...), `NONE` for no key, or `VK:<code>` for a Windows virtual-key code. Names are case-insensitive.
 
-For example, this changes Cross to F or Space, moves the left stick to IJKL, uses the mouse buttons for Square and R2, and keeps all other built-in bindings:
+The default mapping:
 
 ```ini
-Cross = KEY:F
-Cross = KEY:Space
-LeftStickLeft = KEY:J
-LeftStickRight = KEY:L
-LeftStickUp = KEY:I
-LeftStickDown = KEY:K
-Square = MOUSE:Left
-R2 = MOUSE:Right
-ToggleMouse = MOUSE:Middle
+[pad]
+xinput=1
+cross=Z
+circle=X
+square=C
+triangle=V
+up=UP
+down=DOWN
+left=LEFT
+right=RIGHT
+l1=Q
+r1=E
+l2=1
+r2=3
+l3=F
+r3=G
+options=RETURN
+touchpad=T
+ls_up=W
+ls_down=S
+ls_left=A
+ls_right=D
+rs_up=I
+rs_down=K
+rs_left=J
+rs_right=L
 ```
-
-An invalid line reports the file and line number and stops input initialization. If the configured file does not exist or cannot be read, AnyPS5 reports an error. With no `anyps5-input.ini` and no `ANYPS5_INPUT_CONFIG`, the built-in mapping is used.
