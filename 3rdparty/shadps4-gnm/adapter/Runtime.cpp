@@ -73,6 +73,14 @@ namespace {
 // no watchers behind. Both take this lock (recursive: a fault inside the copy may re-enter Protect).
 std::recursive_mutex protection_mutex;
 
+std::atomic<u64> region_epoch{1};
+
+struct ProtectionEpochBump {
+    ~ProtectionEpochBump() {
+        region_epoch.fetch_add(1, std::memory_order_release);
+    }
+};
+
 } // namespace
 
 void AddressSpace::Protect(VAddr virtual_addr, u64 size, MemoryPermission perms) {
@@ -90,6 +98,7 @@ void AddressSpace::Protect(VAddr virtual_addr, u64 size, MemoryPermission perms)
     }
     VAddr cursor = virtual_addr;
     const VAddr end = virtual_addr + size;
+    const ProtectionEpochBump bump;
     while (cursor < end) {
         MEMORY_BASIC_INFORMATION info{};
         if (VirtualQuery(reinterpret_cast<const void*>(cursor), &info, sizeof info) != sizeof info) {
@@ -142,6 +151,76 @@ std::string DescribeGuestPage(VAddr address) {
 
 namespace {
 
+constexpr u32 RegionValid = 1;
+constexpr u32 RegionReadable = 2;
+constexpr u32 RegionWritable = 4;
+constexpr size_t RegionCacheSize = 256;
+
+struct CachedRegion {
+    VAddr begin;
+    VAddr end;
+    u32 flags;
+};
+
+struct RegionCache {
+    u64 epoch{0};
+    size_t next{0};
+    size_t last{0};
+    CachedRegion entries[RegionCacheSize]{};
+};
+
+thread_local RegionCache region_cache;
+
+u32 RegionFlags(const MEMORY_BASIC_INFORMATION& info) {
+    if (info.State != MEM_COMMIT || (info.Protect & PAGE_GUARD) != 0) {
+        return 0;
+    }
+    u32 flags = RegionValid;
+    if ((info.Protect & PAGE_NOACCESS) == 0) {
+        flags |= RegionReadable;
+    }
+    if ((info.Protect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_WRITECOPY)) != 0) {
+        flags |= RegionWritable;
+    }
+    return flags;
+}
+
+bool LookupRegion(VAddr address, VAddr& end, u32& flags) {
+    RegionCache& cache = region_cache;
+    const u64 epoch = region_epoch.load(std::memory_order_acquire);
+    if (cache.epoch != epoch) {
+        cache.epoch = epoch;
+        cache.next = 0;
+        cache.last = 0;
+        for (CachedRegion& entry : cache.entries) {
+            entry = CachedRegion{};
+        }
+    }
+    for (size_t step = 0; step < RegionCacheSize; ++step) {
+        const size_t index = (cache.last + step) % RegionCacheSize;
+        const CachedRegion& entry = cache.entries[index];
+        if (address >= entry.begin && address < entry.end) {
+            cache.last = index;
+            end = entry.end;
+            flags = entry.flags;
+            return true;
+        }
+    }
+    MEMORY_BASIC_INFORMATION info{};
+    if (VirtualQuery(reinterpret_cast<const void*>(address), &info, sizeof info) != sizeof info) {
+        return false;
+    }
+    const VAddr begin = reinterpret_cast<VAddr>(info.BaseAddress);
+    end = begin + info.RegionSize;
+    flags = RegionFlags(info);
+    if (flags != 0) {
+        cache.entries[cache.next] = CachedRegion{begin, end, flags};
+        cache.last = cache.next;
+        cache.next = (cache.next + 1) % RegionCacheSize;
+    }
+    return true;
+}
+
 bool QueryRegion(VAddr address, MEMORY_BASIC_INFORMATION& info) {
     return VirtualQuery(reinterpret_cast<const void*>(address), &info, sizeof info) == sizeof info;
 }
@@ -152,15 +231,20 @@ bool Committed(const MEMORY_BASIC_INFORMATION& info) {
 
 } // namespace
 
+void MemoryManager::BeginFrame() {
+    region_epoch.fetch_add(1, std::memory_order_release);
+}
+
 bool MemoryManager::IsValidMapping(VAddr virtual_addr, u64 size) {
-    MEMORY_BASIC_INFORMATION info{};
     VAddr cursor = virtual_addr;
     const VAddr end = virtual_addr + (size == 0 ? 1 : size);
     while (cursor < end) {
-        if (!QueryRegion(cursor, info) || !Committed(info)) {
+        VAddr region_end = 0;
+        u32 flags = 0;
+        if (!LookupRegion(cursor, region_end, flags) || (flags & RegionValid) == 0) {
             return false;
         }
-        cursor = reinterpret_cast<VAddr>(info.BaseAddress) + info.RegionSize;
+        cursor = region_end;
     }
     return true;
 }
@@ -179,15 +263,15 @@ u64 MemoryManager::ClampRangeSize(VAddr virtual_addr, u64 size) {
 }
 
 void MemoryManager::CopySparseMemory(VAddr virtual_addr, u8* dest, u64 size) {
-    MEMORY_BASIC_INFORMATION info{};
     while (size != 0) {
-        if (!QueryRegion(virtual_addr, info)) {
+        VAddr region_end = 0;
+        u32 flags = 0;
+        if (!LookupRegion(virtual_addr, region_end, flags)) {
             std::memset(dest, 0, size);
             return;
         }
-        const VAddr region_end = reinterpret_cast<VAddr>(info.BaseAddress) + info.RegionSize;
         const u64 chunk = std::min<u64>(size, region_end - virtual_addr);
-        if (Committed(info) && (info.Protect & PAGE_NOACCESS) == 0) {
+        if ((flags & RegionReadable) != 0) {
             std::memcpy(dest, reinterpret_cast<const void*>(virtual_addr), chunk);
         } else {
             std::memset(dest, 0, chunk);
@@ -199,17 +283,17 @@ void MemoryManager::CopySparseMemory(VAddr virtual_addr, u8* dest, u64 size) {
 }
 
 bool MemoryManager::TryWriteBacking(void* address, const void* data, u64 size) {
-    MEMORY_BASIC_INFORMATION info{};
     auto* cursor = static_cast<u8*>(address);
     const auto* source = static_cast<const u8*>(data);
     while (size != 0) {
         std::lock_guard lock{protection_mutex};
-        if (!QueryRegion(reinterpret_cast<VAddr>(cursor), info) || !Committed(info)) {
+        VAddr region_end = 0;
+        u32 flags = 0;
+        if (!LookupRegion(reinterpret_cast<VAddr>(cursor), region_end, flags) || (flags & RegionValid) == 0) {
             return false;
         }
-        const auto* region_end = static_cast<u8*>(info.BaseAddress) + info.RegionSize;
-        const u64 chunk = std::min<u64>(size, static_cast<u64>(region_end - cursor));
-        const bool writable = (info.Protect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_WRITECOPY)) != 0;
+        const u64 chunk = std::min<u64>(size, region_end - reinterpret_cast<VAddr>(cursor));
+        const bool writable = (flags & RegionWritable) != 0;
         DWORD previous = 0;
         if (!writable && !VirtualProtect(cursor, chunk, PAGE_READWRITE, &previous)) {
             return false;
@@ -217,6 +301,7 @@ bool MemoryManager::TryWriteBacking(void* address, const void* data, u64 size) {
         std::memcpy(cursor, source, chunk);
         if (!writable) {
             VirtualProtect(cursor, chunk, previous, &previous);
+            region_epoch.fetch_add(1, std::memory_order_release);
         }
         size -= chunk;
         cursor += chunk;

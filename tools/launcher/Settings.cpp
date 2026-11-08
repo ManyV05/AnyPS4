@@ -100,6 +100,7 @@ Settings LoadSettings() {
     settings.saveSlot = ReadInt(file, L"save_slot", 1);
     if (settings.saveSlot < 1 || settings.saveSlot > kSaveSlotCount) settings.saveSlot = 1;
     settings.askSaveSlot = ReadInt(file, L"ask_save_slot", 1) != 0;
+    settings.uncappedFps = ReadInt(file, L"uncapped_fps", 0) != 0;
     settings.discordEnabled = ReadInt(file, L"discord", 1) != 0;
     settings.discordClientId = ReadString(file, L"discord_client_id", L"");
     std::size_t count = 0;
@@ -140,6 +141,7 @@ void SaveSettings(const Settings& settings) {
     WriteInt(file, L"borderless", settings.borderless ? 1 : 0);
     WriteInt(file, L"save_slot", settings.saveSlot);
     WriteInt(file, L"ask_save_slot", settings.askSaveSlot ? 1 : 0);
+    WriteInt(file, L"uncapped_fps", settings.uncappedFps ? 1 : 0);
     WriteInt(file, L"discord", settings.discordEnabled ? 1 : 0);
     WriteString(file, L"discord_client_id", settings.discordClientId);
     std::size_t count = 0;

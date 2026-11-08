@@ -212,6 +212,12 @@ void Swapchain::FindPresentMode() {
         present_mode = vk::PresentModeKHR::eMailbox;
     }
 
+    if (present_mode == vk::PresentModeKHR::eImmediate && std::ranges::find(modes, present_mode) == modes.cend() &&
+        std::ranges::find(modes, vk::PresentModeKHR::eMailbox) != modes.cend()) {
+        LOG_WARNING(Render, "Immediate presentation is not supported, using Mailbox.");
+        present_mode = vk::PresentModeKHR::eMailbox;
+    }
+
     if (std::ranges::find(modes, present_mode) == modes.cend()) {
         // FIFO is guaranteed to be supported by the Vulkan spec.
         constexpr auto fallback = vk::PresentModeKHR::eFifo;

@@ -28,6 +28,7 @@ public:
         const VAddr max_gpu_address{0x10000000000};
         return virtual_addr + size < max_gpu_address;
     }
+    static void BeginFrame();
     bool IsValidMapping(VAddr virtual_addr, u64 size = 0);
     u64 ClampRangeSize(VAddr virtual_addr, u64 size);
     void CopySparseMemory(VAddr source, u8* dest, u64 size);

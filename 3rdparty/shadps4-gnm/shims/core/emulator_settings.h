@@ -34,6 +34,10 @@ struct EmulatorSettingsImpl {
     bool IsFsrEnabled() const { return false; }
     GpuReadbacksMode GetReadbacksMode() const { return GpuReadbacksMode::Disabled; }
     std::string GetPresentMode() const {
+        const char* uncapped = std::getenv("ORBIS_VIDEO_UNCAPPED");
+        if (uncapped != nullptr && uncapped[0] == '1') {
+            return "Immediate";
+        }
         const char* mode = std::getenv("ORBIS_GNM_PRESENT_MODE");
         return mode != nullptr ? mode : "Fifo";
     }

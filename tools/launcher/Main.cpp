@@ -51,6 +51,7 @@ constexpr int kIdBorderless = 191;
 constexpr int kIdResolutionItem = 195;
 constexpr int kIdSaveSlot = 192;
 constexpr int kIdAskSaveSlot = 193;
+constexpr int kIdUncapped = 194;
 constexpr int kIdSlotItem = 230;
 constexpr int kIdDiscord = 160;
 constexpr int kIdDiscordId = 161;
@@ -67,7 +68,7 @@ constexpr UINT kMessageInstallDone = WM_APP + 2;
 constexpr UINT_PTR kTimerHover = 1;
 
 constexpr int kClientWidth = 1180;
-constexpr int kClientHeight = 656;
+constexpr int kClientHeight = 690;
 constexpr int kHeaderHeight = 96;
 
 constexpr int kPageHome = 0;
@@ -148,7 +149,7 @@ HWND Control(int id) {
 }
 
 bool IsCheckbox(int id) {
-    return id == kIdXInput || id == kIdBorderless || id == kIdDiscord || id == kIdValidation || id == kIdPipelineCache || id == kIdHeadless || id == kIdDiagnostics || id == kIdAskSaveSlot;
+    return id == kIdXInput || id == kIdBorderless || id == kIdDiscord || id == kIdValidation || id == kIdPipelineCache || id == kIdHeadless || id == kIdDiagnostics || id == kIdAskSaveSlot || id == kIdUncapped;
 }
 
 bool IsSlider(int id) {
@@ -203,6 +204,7 @@ void ReadControlsIntoSettings() {
     g_settings.headless = g_checked[kIdHeadless];
     g_settings.diagnostics = g_checked[kIdDiagnostics];
     g_settings.askSaveSlot = g_checked[kIdAskSaveSlot];
+    g_settings.uncappedFps = g_checked[kIdUncapped];
     g_settings.bgmVolume = static_cast<int>(SendMessageW(Control(kIdBgm), TBM_GETPOS, 0, 0));
     g_settings.mainVolume = static_cast<int>(SendMessageW(Control(kIdMain), TBM_GETPOS, 0, 0));
     g_settings.musicFloor = static_cast<int>(SendMessageW(Control(kIdFloor), TBM_GETPOS, 0, 0));
@@ -260,7 +262,7 @@ void RefreshGameRunning() {
     }
     if (running == g_gameRunning) return;
     g_gameRunning = running;
-    RECT audio = ui::Rect(376, 462, 340, 176);
+    RECT audio = ui::Rect(376, 492, 340, 176);
     InvalidateRect(g_window, &audio, FALSE);
 }
 
@@ -333,6 +335,7 @@ bool LaunchTitle(Settings& settings, HANDLE* process, const std::function<void(c
     environment.emplace_back(L"APS5_NO_WRITE_WATCH", settings.writeWatch ? L"" : L"1");
     environment.emplace_back(L"ORBIS_GNM_PRESENT_MODE", settings.presentMode);
     environment.emplace_back(L"ORBIS_RENDER_FPS_CAP", std::to_wstring(settings.fpsCap));
+    environment.emplace_back(L"ORBIS_VIDEO_UNCAPPED", settings.uncappedFps ? L"1" : L"");
     environment.emplace_back(L"ORBIS_GNM_VALIDATION", settings.validation ? L"1" : L"");
     environment.emplace_back(L"ORBIS_GNM_NO_PIPELINE_CACHE", settings.pipelineCache ? L"" : L"1");
     environment.emplace_back(L"ORBIS_GNM_HEADLESS", settings.headless ? L"1" : L"");
@@ -369,8 +372,8 @@ bool LaunchTitle(Settings& settings, HANDLE* process, const std::function<void(c
     const std::wstring logFile = (logDirectory / (std::wstring(L"session-") + stamp + L".log")).wstring();
     std::wstring error;
     if (launcher::StartDetached(executable, settings.installDirectory, environment, logFile, error, process)) {
-        log(L"Started " + executable + L" (present " + settings.presentMode + L", frame limit " +
-                  (settings.fpsCap == 0 ? std::wstring(L"off") : std::to_wstring(settings.fpsCap) + L" fps") + L", BGM " + std::to_wstring(settings.bgmVolume) + L" %, voices " +
+        log(L"Started " + executable + (settings.uncappedFps ? std::wstring(L" (FPS unlocked") : L" (present " + settings.presentMode + L", frame limit " +
+                  (settings.fpsCap == 0 ? std::wstring(L"off") : std::to_wstring(settings.fpsCap) + L" fps")) + L", BGM " + std::to_wstring(settings.bgmVolume) + L" %, voices " +
                   std::to_wstring(settings.mainVolume) + L" %, save slot " + std::to_wstring(saveSlot) + (settings.diagnostics ? L", diagnostics on" : L"") + L"); log " + logFile);
         return true;
     }
@@ -683,10 +686,10 @@ void CreateControls() {
     AddButton(kPageHome, L"Open install folder", 668, 246, 210, 64, kIdOpenFolder);
     AddButton(kPageHome, L"Add to Steam", 890, 246, 246, 64, kIdSteam);
 
-    AddCard(kPageHome, 24, 344, 1132, 296, L"ACTIVITY");
+    AddCard(kPageHome, 24, 344, 1132, 324, L"ACTIVITY");
     {
-        g_fields.push_back({kPageHome, ui::Rect(44, 384, 1092, 240), nullptr});
-        g_log = AddChild(kPageHome, L"EDIT", L"", ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL, 52, 390, 1076, 228, kIdLog);
+        g_fields.push_back({kPageHome, ui::Rect(44, 384, 1092, 268), nullptr});
+        g_log = AddChild(kPageHome, L"EDIT", L"", ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL, 52, 390, 1076, 256, kIdLog);
         g_fields.back().edit = g_log;
         SendMessageW(g_log, WM_SETFONT, reinterpret_cast<WPARAM>(ui::FontHandle(ui::kFontMono)), TRUE);
         ui::StyleScrollBars(g_log);
@@ -707,7 +710,7 @@ void CreateControls() {
     AddLabel(kPageSettings, 44, 374, 300, 16, L"Discord application id (discord.com/developers)");
     AddField(kPageSettings, g_settings.discordClientId, 44, 394, 300, 30, kIdDiscordId);
 
-    AddCard(kPageSettings, 376, 112, 340, 338, L"GRAPHICS");
+    AddCard(kPageSettings, 376, 112, 340, 368, L"GRAPHICS");
     AddLabel(kPageSettings, 396, 146, 88, 28, L"Present mode", ui::kFontSmall, ui::kText);
     for (int k = 0; k < 3; ++k) AddButton(kPageSettings, kPresentCaptions[k], 488 + k * 70, 146, 66, 28, kIdPresentBase + k);
     AddLabel(kPageSettings, 396, 180, 88, 28, L"Frame limit", ui::kFontSmall, ui::kText);
@@ -716,30 +719,31 @@ void CreateControls() {
     AddButton(kPageSettings, kResolutionCaptions[ResolutionIndex()], 396, 234, 300, 28, kIdResolution);
     AddLabel(kPageSettings, 396, 264, 300, 32, L"Scales display window. Internal game render stays 1080p.", ui::kFontSmall, ui::kMuted, DT_LEFT | DT_TOP | DT_WORDBREAK);
     AddCheckbox(kPageSettings, L"Borderless Fullscreen", 396, 302, 300, kIdBorderless, g_settings.borderless);
-    AddCheckbox(kPageSettings, L"Persistent pipeline cache", 396, 332, 300, kIdPipelineCache, g_settings.pipelineCache);
-    AddCheckbox(kPageSettings, L"Vulkan validation layer", 396, 362, 300, kIdValidation, g_settings.validation);
-    AddCheckbox(kPageSettings, L"Headless (no rendering)", 396, 392, 300, kIdHeadless, g_settings.headless);
-    AddCheckbox(kPageSettings, L"Diagnostics (writes logs, slows the game)", 396, 422, 300, kIdDiagnostics, g_settings.diagnostics);
+    AddCheckbox(kPageSettings, L"Unlock FPS (no frame limit, no V-Sync)", 396, 332, 300, kIdUncapped, g_settings.uncappedFps);
+    AddCheckbox(kPageSettings, L"Persistent pipeline cache", 396, 362, 300, kIdPipelineCache, g_settings.pipelineCache);
+    AddCheckbox(kPageSettings, L"Vulkan validation layer", 396, 392, 300, kIdValidation, g_settings.validation);
+    AddCheckbox(kPageSettings, L"Headless (no rendering)", 396, 422, 300, kIdHeadless, g_settings.headless);
+    AddCheckbox(kPageSettings, L"Diagnostics (writes logs, slows the game)", 396, 452, 300, kIdDiagnostics, g_settings.diagnostics);
     EnableWindow(Control(kIdResolution), g_settings.borderless ? FALSE : TRUE);
 
-    AddCard(kPageSettings, 24, 462, 340, 176, L"SAVE SLOT");
+    AddCard(kPageSettings, 24, 462, 340, 206, L"SAVE SLOT");
     AddLabel(kPageSettings, 44, 496, 300, 16, L"Slot the game loads and saves in", ui::kFontSmall, ui::kText);
     AddButton(kPageSettings, kSaveSlotCaptions[SaveSlotIndex()], 44, 516, 300, 28, kIdSaveSlot);
     AddCheckbox(kPageSettings, L"Ask which slot when saving at the fairy", 44, 552, 300, kIdAskSaveSlot, g_settings.askSaveSlot);
     AddLabel(kPageSettings, 44, 584, 300, 44, L"Each slot has its own saves. A running game uses a new slot from its next save.",
              ui::kFontSmall, ui::kMuted, DT_LEFT | DT_TOP | DT_WORDBREAK);
 
-    AddCard(kPageSettings, 376, 462, 340, 176, L"AUDIO");
-    AddLabel(kPageSettings, 456, 474, 240, 20, [] { return g_gameRunning ? std::wstring(L"Live: the running game follows these sliders") : std::wstring(L"Applied live while the game runs"); },
+    AddCard(kPageSettings, 376, 492, 340, 176, L"AUDIO");
+    AddLabel(kPageSettings, 456, 504, 240, 20, [] { return g_gameRunning ? std::wstring(L"Live: the running game follows these sliders") : std::wstring(L"Applied live while the game runs"); },
              ui::kFontSmall, ui::kMuted, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
-    AddSlider(kPageSettings, kIdBgm, 500, [] { return L"Music (BGM): " + std::to_wstring(SendMessageW(Control(kIdBgm), TBM_GETPOS, 0, 0)) + L" %"; }, g_settings.bgmVolume);
-    AddSlider(kPageSettings, kIdMain, 540, [] { return L"Voices and effects: " + std::to_wstring(SendMessageW(Control(kIdMain), TBM_GETPOS, 0, 0)) + L" %"; },
+    AddSlider(kPageSettings, kIdBgm, 530, [] { return L"Music (BGM): " + std::to_wstring(SendMessageW(Control(kIdBgm), TBM_GETPOS, 0, 0)) + L" %"; }, g_settings.bgmVolume);
+    AddSlider(kPageSettings, kIdMain, 570, [] { return L"Voices and effects: " + std::to_wstring(SendMessageW(Control(kIdMain), TBM_GETPOS, 0, 0)) + L" %"; },
               g_settings.mainVolume);
-    AddSlider(kPageSettings, kIdFloor, 580,
+    AddSlider(kPageSettings, kIdFloor, 610,
               [] { return L"Music floor when the title mutes it: " + std::to_wstring(SendMessageW(Control(kIdFloor), TBM_GETPOS, 0, 0)) + L" %"; },
               g_settings.musicFloor);
 
-    AddCard(kPageSettings, 728, 112, 428, 526, L"CONTROLS");
+    AddCard(kPageSettings, 728, 112, 428, 556, L"CONTROLS");
     AddLabel(kPageSettings, 748, 146, 388, 18, L"Click a key to change it. Escape cancels.");
     std::size_t count = 0;
     const anyps4::PadBinding* bindings = anyps4::PadBindings(count);
@@ -1255,7 +1259,7 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
     case WM_HSCROLL:
         for (const int id : {kIdBgm, kIdMain, kIdFloor}) InvalidateRect(Control(id), nullptr, FALSE);
         {
-            RECT audio = ui::Rect(376, 462, 340, 176);
+            RECT audio = ui::Rect(376, 492, 340, 176);
             InvalidateRect(window, &audio, FALSE);
         }
         if (g_gamePid != 0) {

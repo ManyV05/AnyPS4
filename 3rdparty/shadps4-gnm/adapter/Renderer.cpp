@@ -20,6 +20,7 @@
 #include <cstdlib>
 #include "core/emulator_settings.h"
 #include "core/libraries/videoout/buffer.h"
+#include "core/memory.h"
 #include "sdl_window.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -60,6 +61,10 @@ using WindowHandleFunction = void* (*)();
 // the cadence. Sleeps to within 2 ms with a 1 ms timer resolution, then yields.
 u32 FrameCap() {
     static const u32 cap = [] {
+        const char* uncapped = std::getenv("ORBIS_VIDEO_UNCAPPED");
+        if (uncapped != nullptr && uncapped[0] == '1') {
+            return 0u;
+        }
         const char* v = std::getenv("ORBIS_RENDER_FPS_CAP");
         if (v == nullptr || *v == '\0') {
             return 60u;
@@ -302,6 +307,7 @@ bool RendererReady() {
 }
 
 bool PresentFlip(const Libraries::VideoOut::BufferAttribute& attribute, VAddr address) {
+    Core::MemoryManager::BeginFrame();
     if (renderer == nullptr || !renderer->swapchain) {
         return false;
     }
