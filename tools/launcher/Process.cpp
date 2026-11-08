@@ -12,7 +12,7 @@ std::wstring Decode(const std::string& bytes) {
     int length = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, bytes.data(), static_cast<int>(bytes.size()), nullptr, 0);
     UINT codePage = CP_UTF8;
     if (length == 0) {
-        codePage = CP_ACP;
+        codePage = CP_OEMCP;
         length = MultiByteToWideChar(codePage, 0, bytes.data(), static_cast<int>(bytes.size()), nullptr, 0);
     }
     std::wstring wide(static_cast<std::size_t>(length), L'\0');
