@@ -91,14 +91,14 @@ bool PrepareOutputFile(const std::wstring& path, LineSink sink) {
     if (writable()) return true;
     const unsigned long running = FindRunningTitle(path);
     if (running != 0) {
-        sink(L"  " + name + L" is in use by the game (process " + std::to_wstring(running) + L"). Close it; waiting up to 30 seconds for it to exit.");
+        sink(L"  " + name + L" is in use by the game (process " + std::to_wstring(running) + L"). Close it; waiting up to 90 seconds for it to exit.");
         HANDLE process = OpenProcess(SYNCHRONIZE, FALSE, running);
         if (process != nullptr) {
-            WaitForSingleObject(process, 30000);
+            WaitForSingleObject(process, 90000);
             CloseHandle(process);
         }
         if (FindRunningTitle(path) != 0) {
-            sink(L"error: " + name + L" is still running. Close the game (it can take about 15 seconds to finish closing) and press Install again.");
+            sink(L"error: " + name + L" is still running. Close the game (it can take up to a minute to finish closing) and press Install again.");
             return false;
         }
     }
