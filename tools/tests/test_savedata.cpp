@@ -108,6 +108,23 @@ int RunTests() {
     Check(orbis_sceSaveDataDelete(&del) == kErrorNotFound, "deleting again is NOT_FOUND");
     Check(orbis_sceSaveDataTerminate() == 0, "terminate");
     std::filesystem::remove_all(root);
+
+    const std::filesystem::path saves = std::filesystem::temp_directory_path() / "anyps4-saveslot-test";
+    std::filesystem::remove_all(saves);
+    Check(ParseSaveSlot(nullptr) == 1 && ParseSaveSlot("") == 1, "no slot selected means slot 1");
+    Check(ParseSaveSlot("1") == 1 && ParseSaveSlot("3") == 3 && ParseSaveSlot("5") == 5, "slots 1 to 5 are accepted");
+    Check(ParseSaveSlot("0") == 1 && ParseSaveSlot("6") == 1 && ParseSaveSlot("-2") == 1 && ParseSaveSlot("two") == 1 && ParseSaveSlot("2x") == 1, "an invalid slot falls back to slot 1");
+    Check(ResolveSaveRoot(saves, "TEST00001", 3) == saves / "slot_3" / "TEST00001", "slot 3 keeps its saves in slot_3");
+    Check(ResolveSaveRoot(saves, "TEST00001", 2) != ResolveSaveRoot(saves, "TEST00001", 3), "two slots never share a directory");
+    std::filesystem::create_directories(saves / "TEST00001" / "SYSSAVE");
+    std::ofstream(saves / "TEST00001" / "SYSSAVE" / "data.bin") << "chapter 4";
+    Check(ResolveSaveRoot(saves, "TEST00001", 2) == saves / "slot_2" / "TEST00001" && std::filesystem::exists(saves / "TEST00001"), "slot 2 leaves the saves of a single-slot install alone");
+    const std::filesystem::path first = ResolveSaveRoot(saves, "TEST00001", 1);
+    Check(first == saves / "slot_1" / "TEST00001" && std::filesystem::exists(first / "SYSSAVE" / "data.bin") && !std::filesystem::exists(saves / "TEST00001"), "slot 1 adopts the saves of a single-slot install");
+    Check(ResolveSaveRoot(saves, "TEST00001", 1) == first, "adopting the saves twice changes nothing");
+    std::filesystem::create_directories(saves / "TEST00001" / "OTHER");
+    Check(ResolveSaveRoot(saves, "TEST00001", 1) == first && std::filesystem::exists(saves / "TEST00001" / "OTHER") && std::filesystem::exists(first / "SYSSAVE"), "an existing slot 1 is never overwritten");
+    std::filesystem::remove_all(saves);
     std::printf("%d failure(s)\n", failures);
     return failures == 0 ? 0 : 1;
 }

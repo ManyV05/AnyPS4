@@ -47,6 +47,8 @@ constexpr int kIdSteam = 150;
 constexpr int kIdResolution = 190;
 constexpr int kIdBorderless = 191;
 constexpr int kIdResolutionItem = 195;
+constexpr int kIdSaveSlot = 192;
+constexpr int kIdSlotItem = 230;
 constexpr int kIdDiscord = 160;
 constexpr int kIdDiscordId = 161;
 constexpr int kIdExportSaves = 170;
@@ -77,6 +79,7 @@ constexpr int kResolutionCount = 5;
 const wchar_t* const kResolutionValues[kResolutionCount] = {L"1280x720", L"1920x1080", L"2560x1440", L"2560x1600", L"3840x2160"};
 const wchar_t* const kResolutionCaptions[kResolutionCount] = {L"1280x720", L"1920x1080 (Default)", L"2560x1440", L"2560x1600 (16:10)", L"3840x2160"};
 const wchar_t* const kLanguageCaptions[2] = {L"English (US)", L"Japanese"};
+const wchar_t* const kSaveSlotCaptions[launcher::kSaveSlotCount] = {L"Save Slot 1 (Default)", L"Save Slot 2", L"Save Slot 3", L"Save Slot 4", L"Save Slot 5"};
 
 struct Label {
     int page;
@@ -313,6 +316,10 @@ bool LaunchTitle(Settings& settings, HANDLE* process, const std::function<void(c
     environment.emplace_back(L"ORBIS_WINDOW_WIDTH", windowWidth != 0 ? std::to_wstring(windowWidth) : std::wstring());
     environment.emplace_back(L"ORBIS_WINDOW_HEIGHT", windowHeight != 0 ? std::to_wstring(windowHeight) : std::wstring());
     environment.emplace_back(L"ORBIS_WINDOW_BORDERLESS", settings.borderless ? L"1" : L"");
+    const int saveSlot = settings.saveSlot >= 1 && settings.saveSlot <= launcher::kSaveSlotCount ? settings.saveSlot : 1;
+    environment.emplace_back(L"ORBIS_SAVE_SLOT", std::to_wstring(saveSlot));
+    std::error_code slotError;
+    std::filesystem::create_directories(std::filesystem::path(settings.installDirectory) / L"savedata" / (L"slot_" + std::to_wstring(saveSlot)), slotError);
     environment.emplace_back(L"ORBIS_NGS2_TRACE", settings.diagnostics ? L"1" : L"");
     environment.emplace_back(L"ORBIS_GNM_DUMP_EVERY", settings.diagnostics ? L"3000" : L"");
     environment.emplace_back(L"ORBIS_GNM_LOG", settings.diagnostics ? L"info" : L"");
@@ -328,7 +335,7 @@ bool LaunchTitle(Settings& settings, HANDLE* process, const std::function<void(c
     if (launcher::StartDetached(executable, settings.installDirectory, environment, logFile, error, process)) {
         log(L"Started " + executable + L" (present " + settings.presentMode + L", frame limit " +
                   (settings.fpsCap == 0 ? std::wstring(L"off") : std::to_wstring(settings.fpsCap) + L" fps") + L", BGM " + std::to_wstring(settings.bgmVolume) + L" %, voices " +
-                  std::to_wstring(settings.mainVolume) + L" %" + (settings.diagnostics ? L", diagnostics on" : L"") + L"); log " + logFile);
+                  std::to_wstring(settings.mainVolume) + L" %, save slot " + std::to_wstring(saveSlot) + (settings.diagnostics ? L", diagnostics on" : L"") + L"); log " + logFile);
         return true;
     }
     log(L"Could not start the title: " + error);
@@ -598,6 +605,10 @@ int ResolutionIndex() {
     return 1;
 }
 
+int SaveSlotIndex() {
+    return g_settings.saveSlot >= 1 && g_settings.saveSlot <= launcher::kSaveSlotCount ? g_settings.saveSlot - 1 : 0;
+}
+
 void AddSlider(int page, int id, int labelY, std::function<std::wstring()> label, int value) {
     AddLabel(page, 396, labelY, 300, 18, std::move(label), ui::kFontSmall, ui::kText);
     HWND bar = AddChild(page, TRACKBAR_CLASSW, L"", TBS_HORZ | TBS_NOTICKS, 392, labelY + 16, 308, 22, id);
@@ -622,6 +633,8 @@ void CreateControls() {
         return g_installed ? std::wstring(L"Ready to play. Install again only if you move the game folder or change its files.")
                            : std::wstring(L"Pick your game folder, then press Install (it takes a few seconds). Your game files are never copied.");
     });
+    AddLabel(kPageHome, 652, 150, 484, 18, [] { return L"Active save slot: " + std::wstring(kSaveSlotCaptions[SaveSlotIndex()]); }, ui::kFontSmall, ui::kVioletLight,
+             DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
     AddButton(kPageHome, L"PLAY", 44, 246, 400, 64, kIdPlay);
     AddButton(kPageHome, L"Install", 456, 246, 200, 64, kIdInstall);
     AddButton(kPageHome, L"Open install folder", 668, 246, 210, 64, kIdOpenFolder);
@@ -665,6 +678,12 @@ void CreateControls() {
     AddCheckbox(kPageSettings, L"Headless (no rendering)", 396, 392, 300, kIdHeadless, g_settings.headless);
     AddCheckbox(kPageSettings, L"Diagnostics (writes logs, slows the game)", 396, 422, 300, kIdDiagnostics, g_settings.diagnostics);
     EnableWindow(Control(kIdResolution), g_settings.borderless ? FALSE : TRUE);
+
+    AddCard(kPageSettings, 24, 462, 340, 176, L"SAVE SLOT");
+    AddLabel(kPageSettings, 44, 496, 300, 16, L"Slot the game loads and saves in", ui::kFontSmall, ui::kText);
+    AddButton(kPageSettings, kSaveSlotCaptions[SaveSlotIndex()], 44, 516, 300, 28, kIdSaveSlot);
+    AddLabel(kPageSettings, 44, 552, 300, 70, L"Each slot keeps its own game saves in savedata\\slot_N. Changing the slot never copies or deletes saves; it takes effect the next time you press PLAY. Export Saves backs up every slot.",
+             ui::kFontSmall, ui::kMuted, DT_LEFT | DT_TOP | DT_WORDBREAK);
 
     AddCard(kPageSettings, 376, 462, 340, 176, L"AUDIO");
     AddLabel(kPageSettings, 456, 474, 240, 20, [] { return g_gameRunning ? std::wstring(L"Live: the running game follows these sliders") : std::wstring(L"Applied live while the game runs"); },
@@ -774,7 +793,7 @@ enum class Kind { Primary, Secondary, Tab, Segment, Check, Key, Dropdown };
 
 Kind KindOf(int id) {
     if (id == kIdPlay) return Kind::Primary;
-    if (id == kIdResolution) return Kind::Dropdown;
+    if (id == kIdResolution || id == kIdSaveSlot) return Kind::Dropdown;
     if (id == kIdTabHome || id == kIdTabSettings) return Kind::Tab;
     if ((id >= kIdPresentBase && id < kIdPresentBase + 3) || (id >= kIdFpsBase && id < kIdFpsBase + 3) || (id >= kIdLanguageBase && id < kIdLanguageBase + 2)) return Kind::Segment;
     if (IsCheckbox(id)) return Kind::Check;
@@ -788,16 +807,19 @@ bool IsSegmentSelected(int id) {
     return g_settings.fpsCap == kFpsValues[id - kIdFpsBase];
 }
 
-void DrawResolutionItem(const DRAWITEMSTRUCT* item) {
+const wchar_t* const* g_menuCaptions = nullptr;
+int g_menuSelected = 0;
+
+void DrawMenuItem(const DRAWITEMSTRUCT* item) {
     const int index = static_cast<int>(item->itemData);
     HDC dc = item->hDC;
     const RECT r = item->rcItem;
     ui::FillSolid(dc, r, (item->itemState & ODS_SELECTED) != 0 ? ui::kButtonHover : ui::kField);
-    if (index == ResolutionIndex()) {
+    if (index == g_menuSelected) {
         const int size = S(14);
         ui::DrawCheck(dc, RECT{r.left + S(10), r.top + (r.bottom - r.top - size) / 2, r.left + S(10) + size, r.top + (r.bottom - r.top - size) / 2 + size}, ui::kVioletLight);
     }
-    ui::DrawTextLine(dc, kResolutionCaptions[index], RECT{r.left + S(34), r.top, r.right, r.bottom}, ui::kFontSmall, ui::kText, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    ui::DrawTextLine(dc, g_menuCaptions[index], RECT{r.left + S(34), r.top, r.right, r.bottom}, ui::kFontSmall, ui::kText, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 }
 
 void DrawButton(const DRAWITEMSTRUCT* item) {
@@ -962,22 +984,38 @@ void PersistSettings() {
     launcher::SavePadConfiguration(g_settings);
 }
 
-void ChooseResolution() {
+int ChooseFromMenu(int control, int firstItem, int count, const wchar_t* const* captions, int selected) {
+    g_menuCaptions = captions;
+    g_menuSelected = selected;
     HMENU menu = CreatePopupMenu();
-    for (int k = 0; k < kResolutionCount; ++k) AppendMenuW(menu, MF_OWNERDRAW, static_cast<UINT_PTR>(kIdResolutionItem + k), reinterpret_cast<LPCWSTR>(static_cast<ULONG_PTR>(k)));
+    for (int k = 0; k < count; ++k) AppendMenuW(menu, MF_OWNERDRAW, static_cast<UINT_PTR>(firstItem + k), reinterpret_cast<LPCWSTR>(static_cast<ULONG_PTR>(k)));
     MENUINFO info{};
     info.cbSize = sizeof info;
     info.fMask = MIM_BACKGROUND;
     info.hbrBack = g_fieldBrush;
     SetMenuInfo(menu, &info);
     RECT button{};
-    GetWindowRect(Control(kIdResolution), &button);
+    GetWindowRect(Control(control), &button);
     const int chosen = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN, button.left, button.bottom + S(2), 0, g_window, nullptr);
     DestroyMenu(menu);
-    if (chosen < kIdResolutionItem || chosen >= kIdResolutionItem + kResolutionCount) return;
-    g_settings.resolution = kResolutionValues[chosen - kIdResolutionItem];
-    SetWindowTextW(Control(kIdResolution), kResolutionCaptions[chosen - kIdResolutionItem]);
-    InvalidateRect(Control(kIdResolution), nullptr, FALSE);
+    if (chosen < firstItem || chosen >= firstItem + count) return -1;
+    SetWindowTextW(Control(control), captions[chosen - firstItem]);
+    InvalidateRect(Control(control), nullptr, FALSE);
+    return chosen - firstItem;
+}
+
+void ChooseResolution() {
+    const int index = ChooseFromMenu(kIdResolution, kIdResolutionItem, kResolutionCount, kResolutionCaptions, ResolutionIndex());
+    if (index < 0) return;
+    g_settings.resolution = kResolutionValues[index];
+    PersistSettings();
+}
+
+void ChooseSaveSlot() {
+    const int index = ChooseFromMenu(kIdSaveSlot, kIdSlotItem, launcher::kSaveSlotCount, kSaveSlotCaptions, SaveSlotIndex());
+    if (index < 0) return;
+    g_settings.saveSlot = index + 1;
+    InvalidateRect(g_window, nullptr, FALSE);
     PersistSettings();
 }
 
@@ -1017,7 +1055,7 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
             return TRUE;
         }
         if (reinterpret_cast<const DRAWITEMSTRUCT*>(lParam)->CtlType == ODT_MENU) {
-            DrawResolutionItem(reinterpret_cast<const DRAWITEMSTRUCT*>(lParam));
+            DrawMenuItem(reinterpret_cast<const DRAWITEMSTRUCT*>(lParam));
             return TRUE;
         }
         break;
@@ -1071,6 +1109,10 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
         if (code != BN_CLICKED) break;
         if (id == kIdResolution) {
             ChooseResolution();
+            return 0;
+        }
+        if (id == kIdSaveSlot) {
+            ChooseSaveSlot();
             return 0;
         }
         if (IsCheckbox(id)) {

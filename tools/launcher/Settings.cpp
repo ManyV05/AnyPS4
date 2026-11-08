@@ -97,6 +97,8 @@ Settings LoadSettings() {
     settings.language = ReadInt(file, L"language", 1);
     settings.resolution = ReadString(file, L"resolution", L"1920x1080");
     settings.borderless = ReadInt(file, L"borderless", 0) != 0;
+    settings.saveSlot = ReadInt(file, L"save_slot", 1);
+    if (settings.saveSlot < 1 || settings.saveSlot > kSaveSlotCount) settings.saveSlot = 1;
     settings.discordEnabled = ReadInt(file, L"discord", 1) != 0;
     settings.discordClientId = ReadString(file, L"discord_client_id", L"");
     std::size_t count = 0;
@@ -135,6 +137,7 @@ void SaveSettings(const Settings& settings) {
     WriteInt(file, L"language", settings.language);
     WriteString(file, L"resolution", settings.resolution);
     WriteInt(file, L"borderless", settings.borderless ? 1 : 0);
+    WriteInt(file, L"save_slot", settings.saveSlot);
     WriteInt(file, L"discord", settings.discordEnabled ? 1 : 0);
     WriteString(file, L"discord_client_id", settings.discordClientId);
     std::size_t count = 0;

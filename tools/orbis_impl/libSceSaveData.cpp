@@ -49,6 +49,7 @@ constexpr u32 kSortFreeBlocks = 5;
 constexpr u64 kBlockSize = 32768;
 constexpr u64 kDefaultBlocks = 96;
 constexpr std::size_t kSlots = 16;
+constexpr int kSaveSlotCount = 5;
 
 struct TitleId {
     char data[10];
@@ -162,6 +163,7 @@ struct State {
     bool initialized = false;
     fs::path root;
     std::string titleId;
+    int saveSlot = 0;
     std::array<Slot, kSlots> slots{};
     AliasFunction addAlias = nullptr;
     UnaliasFunction removeAlias = nullptr;
@@ -289,22 +291,53 @@ bool Glob(const std::string& pattern, const std::string& text) {
     return p == pattern.size();
 }
 
+int ParseSaveSlot(const char* text) {
+    if (text == nullptr || *text == '\0') return 1;
+    char* end = nullptr;
+    const long value = std::strtol(text, &end, 10);
+    if (*end != '\0' || value < 1 || value > kSaveSlotCount) {
+        Log(std::string("ORBIS_SAVE_SLOT=") + text + " is not a slot from 1 to " + std::to_string(kSaveSlotCount) + ": using slot 1");
+        return 1;
+    }
+    return static_cast<int>(value);
+}
+
+fs::path ResolveSaveRoot(const fs::path& saveData, const std::string& titleId, int slot) {
+    const fs::path legacy = saveData / titleId;
+    const fs::path root = saveData / ("slot_" + std::to_string(slot)) / titleId;
+    std::error_code error;
+    if (slot == 1 && fs::is_directory(legacy, error) && !fs::exists(root, error)) {
+        fs::create_directories(root.parent_path(), error);
+        fs::rename(legacy, root, error);
+        if (error) {
+            Log("could not move the saves of " + legacy.string() + " into slot 1 (" + error.message() + "): using them where they are");
+            return legacy;
+        }
+        Log("moved the existing saves of " + legacy.string() + " into slot 1");
+    }
+    return root;
+}
+
 void EnsureInitialized(State& state) {
     if (!state.root.empty()) return;
     const fs::path exeDir = ExecutableDirectory();
     if (const char* id = std::getenv("ORBIS_TITLE_ID")) state.titleId = id;
     if (state.titleId.empty()) state.titleId = ReadTitleId(exeDir / "app0" / "sce_sys" / "param.sfo");
     if (state.titleId.empty()) state.titleId = "UNKNOWN";
-    if (const char* dir = std::getenv("ORBIS_SAVEDATA_DIR")) state.root = fs::path(dir);
-    else state.root = exeDir / "savedata" / state.titleId;
+    if (const char* dir = std::getenv("ORBIS_SAVEDATA_DIR")) {
+        state.root = fs::path(dir);
+    } else {
+        state.saveSlot = ParseSaveSlot(std::getenv("ORBIS_SAVE_SLOT"));
+        state.root = ResolveSaveRoot(exeDir / "savedata", state.titleId, state.saveSlot);
+    }
     std::error_code error;
     fs::create_directories(state.root, error);
     const HMODULE libc = GetModuleHandleW(L"libc.prx");
     if (libc != nullptr) {
-        state.addAlias = reinterpret_cast<AliasFunction>(GetProcAddress(libc, "AddPathAlias_nid_no_patch"));
-        state.removeAlias = reinterpret_cast<UnaliasFunction>(GetProcAddress(libc, "RemovePathAlias_nid_no_patch"));
+        state.addAlias = reinterpret_cast<AliasFunction>(reinterpret_cast<void*>(GetProcAddress(libc, "AddPathAlias_nid_no_patch")));
+        state.removeAlias = reinterpret_cast<UnaliasFunction>(reinterpret_cast<void*>(GetProcAddress(libc, "RemovePathAlias_nid_no_patch")));
     }
-    Log("title " + state.titleId + ", save directory " + state.root.string() + (state.addAlias != nullptr ? "" : " (libc path aliases unavailable: mounts will not resolve)"));
+    Log("title " + state.titleId + (state.saveSlot != 0 ? ", save slot " + std::to_string(state.saveSlot) : std::string()) + ", save directory " + state.root.string() + (state.addAlias != nullptr ? "" : " (libc path aliases unavailable: mounts will not resolve)"));
 }
 
 Slot* FindSlot(State& state, const MountPoint* mountPoint) {

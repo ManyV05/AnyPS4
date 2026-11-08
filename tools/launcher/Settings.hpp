@@ -5,6 +5,8 @@
 
 namespace launcher {
 
+constexpr int kSaveSlotCount = 5;
+
 struct Settings {
     std::wstring gameDirectory;
     std::wstring installDirectory;
@@ -30,6 +32,7 @@ struct Settings {
     int language = 1;
     std::wstring resolution = L"1920x1080";
     bool borderless = false;
+    int saveSlot = 1;
     bool discordEnabled = true;
     std::wstring discordClientId;
     std::array<int, 24> keys{};

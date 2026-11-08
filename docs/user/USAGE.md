@@ -28,7 +28,7 @@ The executable can be started directly, but then its output goes nowhere. To kee
 ./CUSA02799.exe > anyps4/log/session.log 2>&1
 ```
 
-Saves go to `savedata/` beside the executable (`ORBIS_SAVEDATA_DIR` overrides it). Keyboard and controller input is described in [INPUT_MAPPING.md](INPUT_MAPPING.md). The console language is fixed to English (United States).
+Saves go to `savedata/slot_<N>/<title id>/` beside the executable, where N is the save slot chosen in the launcher (`ORBIS_SAVEDATA_DIR` overrides the whole path). Keyboard and controller input is described in [INPUT_MAPPING.md](INPUT_MAPPING.md). The console language is fixed to English (United States).
 
 ## Add to Steam
 
@@ -46,7 +46,9 @@ The `ANYPS4_STEAM_DIR` environment variable points the launcher at another Steam
 
 ## Saves and backups
 
-**Export Saves** and **Import Saves** (Settings, under Paths and saves) back up and restore `savedata/` of the install folder:
+**Save Slot** (Settings) chooses which of five independent sets of saves the game loads and saves in: Save Slot 1 (the default) to Save Slot 5. The choice is kept in `launcher.ini` as `save_slot=1` and shown on the Home page. PLAY starts the game with `ORBIS_SAVE_SLOT=<N>` and creates `savedata/slot_<N>/` when it does not exist; `libSceSaveData` then mounts, lists and deletes the title's save directories inside that slot only, so a new game in one slot never touches another. Changing the slot copies or deletes nothing and applies the next time PLAY is pressed. Saves made before slots existed (`savedata/<title id>/`) are moved into slot 1 the first time the game starts with it, unless slot 1 already holds saves. An invalid `ORBIS_SAVE_SLOT` value means slot 1.
+
+**Export Saves** and **Import Saves** (Settings, under Paths and saves) back up and restore `savedata/` of the install folder, every slot at once:
 
 - Export asks for a file name (the default is `AnyPS4_SaveBackup_YYYYMMDD.zip`) and writes a compressed ZIP with every file under `savedata/`.
 - Import asks for a ZIP, asks for confirmation and replaces `savedata/` with its contents. The current saves are not deleted: they are moved to `savedata_backup_<date>-<time>` next to them. ZIPs made by this launcher, by Windows Explorer or by other tools work, with or without the `savedata/` folder inside; a ZIP with paths that leave the folder (`..`) is refused and nothing is changed. Import is refused while the game runs.
@@ -86,6 +88,7 @@ anyps4/
     pad.ini               keyboard mapping
     log/, audio_dumps/    diagnostics (created when used)
 savedata/
+    slot_1/ ... slot_5/   one set of saves per slot (slot_1 holds the saves of installs made before slots)
 ```
 
 A self-built `libs/` also needs `libgcc_s_seh-1.dll`, `libstdc++-6.dll` and `libwinpthread-1.dll` from the `mingw64/bin` directory of the toolchain that built the libraries; the installer copies them. The libraries are loaded without searching `PATH`, so a copy elsewhere on the system is not used, and a library that needs one of them fails with error 126 (the specified module could not be found) although its `.prx` file is present. Do not place original PS4 or PS5 modules in `libs/`: Windows tries to load them as DLLs and fails with error 193 (not a valid Win32 application).
