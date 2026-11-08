@@ -256,7 +256,12 @@ int InstallFromBundle(const std::wstring& bundleDirectory, const std::wstring& g
     for (const auto& entry : fs::directory_iterator(bundle / L"libs", error)) {
         const fs::path extension = entry.path().extension();
         if (!entry.is_regular_file(error) || (extension != L".prx" && extension != L".dll")) continue;
-        fs::copy_file(entry.path(), libs / entry.path().filename(), fs::copy_options::overwrite_existing, error);
+        for (int attempt = 0; attempt < 40; ++attempt) {
+            fs::copy_file(entry.path(), libs / entry.path().filename(), fs::copy_options::overwrite_existing, error);
+            if (!error || (error != std::errc::permission_denied && error != std::errc::device_or_resource_busy && error != std::errc::text_file_busy)) break;
+            if (attempt == 0) sink(L"  " + entry.path().filename().wstring() + L" is in use; waiting for the game to finish closing.");
+            Sleep(500);
+        }
         if (error) {
             sink(L"error: cannot copy " + entry.path().filename().wstring() + L": " + std::wstring(error.message().begin(), error.message().end()) +
                  L" (is the game still running?)");

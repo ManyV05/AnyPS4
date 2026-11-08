@@ -57,14 +57,20 @@ unsigned long FindRunningTitle(const std::wstring& executablePath) {
     for (BOOL more = Process32FirstW(snapshot, &entry); more && found == 0; more = Process32NextW(snapshot, &entry)) {
         if (_wcsicmp(entry.szExeFile, fileName.c_str()) != 0) continue;
         HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, entry.th32ProcessID);
-        if (process == nullptr) continue;
-        wchar_t image[MAX_PATH * 2];
-        DWORD length = static_cast<DWORD>(std::size(image));
-        if (QueryFullProcessImageNameW(process, 0, image, &length)) {
-            std::error_code error;
-            if (std::filesystem::equivalent(std::filesystem::path(std::wstring(image, length)), wanted, error)) found = entry.th32ProcessID;
+        bool match = process == nullptr;
+        if (process != nullptr) {
+            wchar_t image[MAX_PATH * 2];
+            DWORD length = static_cast<DWORD>(std::size(image));
+            if (QueryFullProcessImageNameW(process, 0, image, &length)) {
+                std::error_code error;
+                const std::filesystem::path running(std::wstring(image, length));
+                match = _wcsicmp(running.lexically_normal().c_str(), wanted.lexically_normal().c_str()) == 0 || std::filesystem::equivalent(running, wanted, error);
+            } else {
+                match = true;
+            }
+            CloseHandle(process);
         }
-        CloseHandle(process);
+        if (match) found = entry.th32ProcessID;
     }
     CloseHandle(snapshot);
     return found;
