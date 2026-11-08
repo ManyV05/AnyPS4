@@ -12,6 +12,8 @@ The launcher (`anyps4_launcher.exe`, built by the top-level CMake on Windows) do
 2. Press **Install**. It relinks `eboot.bin`, generates the runtime libraries, builds them and creates `<install>/CUSA02799.exe`, `libs/`, `app0` (a directory junction to the game folder), `anyps4/` and `savedata/`.
 3. Press **Play**. It starts the executable with the settings from the launcher (music and effects volume, present mode, pipeline cache, validation).
 
+Install replaces `<install>/CUSA02799.exe` and the libraries, so the game has to be closed (it can take about 15 seconds to finish closing after its window goes away). If the executable is still in use the launcher says so in the log, waits up to 30 seconds for it to exit and stops with a message if it does not; it never closes the game for you. A read-only executable is made writable, and a lock that a security program holds for a moment is retried. The relinker does the same and names the reason when it cannot open its output file (`Cannot open output file: ... (the file is in use by another process ...)`).
+
 The installer can also be run by hand:
 
 ```sh

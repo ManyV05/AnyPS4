@@ -548,9 +548,10 @@ void Install() {
     if (!g_settings.relinker.empty()) command += L" --relinker " + launcher::Quote(g_settings.relinker);
     AppendLog(L"Installing: " + command);
     const std::wstring repo = g_settings.repoRoot;
-    std::thread([command, repo] {
+    const std::wstring titleExecutable = launcher::TitleExecutablePath(g_settings.gameDirectory, g_settings.installDirectory);
+    std::thread([command, repo, titleExecutable] {
         int exitCode = -1;
-        launcher::RunCaptured(command, repo, PostLog, exitCode);
+        if (launcher::PrepareOutputFile(titleExecutable, PostLog)) launcher::RunCaptured(command, repo, PostLog, exitCode);
         PostMessageW(g_window, kMessageInstallDone, static_cast<WPARAM>(exitCode), 0);
     }).detach();
 }

@@ -2,6 +2,8 @@
 
 #include <windows.h>
 
+#include "LiveAudio.hpp"
+
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
@@ -54,6 +56,65 @@ bool BundleAvailable(std::wstring& bundleDirectory) {
     if (!fs::is_regular_file(directory / L"libs" / L"libkernel.prx", error)) return false;
     bundleDirectory = directory.wstring();
     return true;
+}
+
+std::wstring TitleExecutablePath(const std::wstring& gameDirectory, const std::wstring& installDirectory) {
+    std::error_code error;
+    const fs::path game = fs::weakly_canonical(gameDirectory, error);
+    std::wstring name = game.filename().wstring();
+    if (name.empty()) name = game.parent_path().filename().wstring();
+    return (fs::weakly_canonical(installDirectory, error) / (name + L".exe")).wstring();
+}
+
+bool PrepareOutputFile(const std::wstring& path, LineSink sink) {
+    std::error_code ec;
+    const fs::path file = path;
+    const std::wstring leftover = path + L".old";
+    fs::remove(leftover, ec);
+    if (!fs::exists(file, ec)) return true;
+    const std::wstring name = file.filename().wstring();
+    const DWORD attributes = GetFileAttributesW(path.c_str());
+    if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_READONLY) != 0) {
+        SetFileAttributesW(path.c_str(), attributes & ~static_cast<DWORD>(FILE_ATTRIBUTE_READONLY));
+        sink(L"  " + name + L" was read-only; the attribute was removed.");
+    }
+    DWORD error = ERROR_SUCCESS;
+    const auto writable = [&]() {
+        HANDLE handle = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (handle == INVALID_HANDLE_VALUE) {
+            error = GetLastError();
+            return false;
+        }
+        CloseHandle(handle);
+        return true;
+    };
+    if (writable()) return true;
+    const unsigned long running = FindRunningTitle(path);
+    if (running != 0) {
+        sink(L"  " + name + L" is in use by the game (process " + std::to_wstring(running) + L"). Close it; waiting up to 30 seconds for it to exit.");
+        HANDLE process = OpenProcess(SYNCHRONIZE, FALSE, running);
+        if (process != nullptr) {
+            WaitForSingleObject(process, 30000);
+            CloseHandle(process);
+        }
+        if (FindRunningTitle(path) != 0) {
+            sink(L"error: " + name + L" is still running. Close the game (it can take about 15 seconds to finish closing) and press Install again.");
+            return false;
+        }
+    }
+    for (int attempt = 0; attempt < 10; ++attempt) {
+        if (writable()) return true;
+        Sleep(500);
+    }
+    if (MoveFileExW(path.c_str(), leftover.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+        sink(L"  " + name + L" could not be overwritten, so it was renamed to " + fs::path(leftover).filename().wstring() + L"; it is removed at the next Install.");
+        return true;
+    }
+    const bool sharing = error == ERROR_SHARING_VIOLATION || error == ERROR_LOCK_VIOLATION;
+    sink(L"error: cannot overwrite " + path + L" (Windows error " + std::to_wstring(static_cast<unsigned long>(error)) + L"). " +
+         (sharing ? L"Another program has it open: close the game and anything that is using the install folder, then press Install again."
+                  : L"Access was denied: check that the folder is not protected (Windows controlled folder access, antivirus) and that you may write there."));
+    return false;
 }
 
 std::wstring RebaseImage(const std::wstring& path, unsigned long long newBase, unsigned long long& oldBase, unsigned long long& relocated) {
@@ -159,6 +220,8 @@ int InstallFromBundle(const std::wstring& bundleDirectory, const std::wstring& g
         return 2;
     }
     const fs::path executable = out / (name + L".exe");
+    fs::create_directories(out, error);
+    if (!PrepareOutputFile(executable.wstring(), sink)) return 8;
 
     sink(L"== 1/4 relinking " + eboot.wstring() + L" -> " + executable.wstring());
     fs::create_directories(out, error);
