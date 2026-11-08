@@ -165,7 +165,7 @@ struct State {
     fs::path root;
     std::string titleId;
     int saveSlot = 0;
-    int launchSlot = 0;
+    bool relaxedCreate = false;
     fs::path saveData;
     anyps4::LiveSaveBlock* live = nullptr;
     std::array<Slot, kSlots> slots{};
@@ -333,6 +333,7 @@ void ApplyRequestedSaveSlot(State& state) {
     std::error_code error;
     fs::create_directories(state.root, error);
     state.saveSlot = requested;
+    state.relaxedCreate = true;
     state.live->activeSlot.store(requested);
     Log("save slot changed to " + std::to_string(requested) + ", save directory " + state.root.string());
 }
@@ -351,7 +352,6 @@ void EnsureInitialized(State& state) {
     } else {
         state.saveSlot = ParseSaveSlot(std::getenv("ORBIS_SAVE_SLOT"));
         state.saveData = exeDir / "savedata";
-        state.launchSlot = state.saveSlot;
         state.root = ResolveSaveRoot(state.saveData, state.titleId, state.saveSlot);
         state.live = anyps4::LiveSaveBlockOfThisProcess(state.saveSlot);
     }
@@ -430,8 +430,7 @@ ORBIS_SYSV_ABI s32 orbis_sceSaveDataMount(const Mount* mount, MountResult* resul
     if (!ValidDirName(dirName)) return kErrorParameter;
     const bool create = (mount->mountMode & kModeCreate) != 0;
     const bool readWrite = (mount->mountMode & kModeReadWrite) != 0;
-    const bool switched = state.live != nullptr && state.saveSlot != state.launchSlot;
-    const bool createIfMissing = (mount->mountMode & kModeCreate2) != 0 || (switched && readWrite);
+    const bool createIfMissing = (mount->mountMode & kModeCreate2) != 0 || (state.relaxedCreate && readWrite);
     const bool readOnly = (mount->mountMode & kModeReadOnly) != 0 && !readWrite;
     for (const Slot& slot : state.slots) {
         if (slot.used && slot.dirName == dirName) return kErrorBusy;
@@ -443,7 +442,7 @@ ORBIS_SYSV_ABI s32 orbis_sceSaveDataMount(const Mount* mount, MountResult* resul
         Log("mount " + dirName + " mode " + std::to_string(mount->mountMode) + ": not found");
         return kErrorNotFound;
     }
-    if (create && exists) {
+    if (create && exists && !state.relaxedCreate) {
         Log("mount " + dirName + " mode " + std::to_string(mount->mountMode) + ": already exists");
         return kErrorExists;
     }

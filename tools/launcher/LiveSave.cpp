@@ -59,4 +59,32 @@ bool ReadLiveSave(unsigned long processId, SaveActivity& activity) {
     return true;
 }
 
+bool SavePromptPending(unsigned long processId, int& activeSlot) {
+    anyps4::LiveSaveBlock* block = Connect(processId);
+    if (block == nullptr || block->state.load() != 2 || block->promptState.load() != 1) return false;
+    activeSlot = block->activeSlot.load();
+    return true;
+}
+
+bool AcceptSavePrompt(unsigned long processId) {
+    anyps4::LiveSaveBlock* block = Connect(processId);
+    if (block == nullptr) return false;
+    block->launcherPid.store(static_cast<std::int32_t>(GetCurrentProcessId()));
+    std::int32_t expected = 1;
+    return block->promptState.compare_exchange_strong(expected, 2);
+}
+
+bool SavePromptOpen(unsigned long processId) {
+    anyps4::LiveSaveBlock* block = Connect(processId);
+    return block != nullptr && block->promptState.load() == 2;
+}
+
+void AnswerSavePrompt(unsigned long processId, int choice) {
+    anyps4::LiveSaveBlock* block = Connect(processId);
+    if (block == nullptr) return;
+    block->promptChoice.store(choice);
+    std::int32_t expected = 2;
+    block->promptState.compare_exchange_strong(expected, 3);
+}
+
 }  // namespace launcher

@@ -130,7 +130,6 @@ int RunTests() {
     live_state.saveData = saves;
     live_state.titleId = "TEST00001";
     live_state.saveSlot = 1;
-    live_state.launchSlot = 1;
     live_state.root = first;
     live_state.live = &live;
     live.requestedSlot.store(1);
@@ -162,6 +161,24 @@ int RunTests() {
     readOnlySlot.hostPath = written.hostPath;
     Unmount(live_state, readOnlySlot);
     Check(live.savesDone.load() == 1, "a read-only unmount is not counted as a save");
+
+    State& global = Global();
+    global.root = saves / "lenient";
+    std::filesystem::create_directories(global.root / "OLDSAVE");
+    Check(orbis_sceSaveDataInitialize(nullptr) == 0, "initialize again");
+    std::strcpy(name.data, "OLDSAVE");
+    mount.mountMode = kModeCreate | kModeReadWrite;
+    Check(orbis_sceSaveDataMount(&mount, &result) == kErrorExists, "creating an existing save is EXISTS before any slot switch");
+    std::strcpy(name.data, "NEWSAVE");
+    mount.mountMode = kModeReadWrite;
+    Check(orbis_sceSaveDataMount(&mount, &result) == kErrorNotFound, "writing to a missing save is NOT_FOUND before any slot switch");
+    global.relaxedCreate = true;
+    Check(orbis_sceSaveDataMount(&mount, &result) == 0 && result.mountStatus == 1, "after a slot switch writing to a missing save creates it");
+    Check(orbis_sceSaveDataUmount(&result.mountPoint) == 0, "umount the created save");
+    std::strcpy(name.data, "OLDSAVE");
+    mount.mountMode = kModeCreate | kModeReadWrite;
+    Check(orbis_sceSaveDataMount(&mount, &result) == 0 && result.mountStatus == 0, "after a slot switch creating an existing save overwrites it");
+    Check(orbis_sceSaveDataTerminate() == 0, "terminate again");
     std::filesystem::remove_all(saves);
     std::printf("%d failure(s)\n", failures);
     return failures == 0 ? 0 : 1;

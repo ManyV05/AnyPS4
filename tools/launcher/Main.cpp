@@ -16,6 +16,7 @@
 #include "DiscordPresence.hpp"
 #include "LiveAudio.hpp"
 #include "LiveSave.hpp"
+#include "SavePicker.hpp"
 #include "PadKeyNames.hpp"
 #include "Process.hpp"
 #include "SaveBackup.hpp"
@@ -49,6 +50,7 @@ constexpr int kIdResolution = 190;
 constexpr int kIdBorderless = 191;
 constexpr int kIdResolutionItem = 195;
 constexpr int kIdSaveSlot = 192;
+constexpr int kIdAskSaveSlot = 193;
 constexpr int kIdSlotItem = 230;
 constexpr int kIdDiscord = 160;
 constexpr int kIdDiscordId = 161;
@@ -146,7 +148,7 @@ HWND Control(int id) {
 }
 
 bool IsCheckbox(int id) {
-    return id == kIdXInput || id == kIdBorderless || id == kIdDiscord || id == kIdValidation || id == kIdPipelineCache || id == kIdHeadless || id == kIdDiagnostics;
+    return id == kIdXInput || id == kIdBorderless || id == kIdDiscord || id == kIdValidation || id == kIdPipelineCache || id == kIdHeadless || id == kIdDiagnostics || id == kIdAskSaveSlot;
 }
 
 bool IsSlider(int id) {
@@ -200,6 +202,7 @@ void ReadControlsIntoSettings() {
     g_settings.pipelineCache = g_checked[kIdPipelineCache];
     g_settings.headless = g_checked[kIdHeadless];
     g_settings.diagnostics = g_checked[kIdDiagnostics];
+    g_settings.askSaveSlot = g_checked[kIdAskSaveSlot];
     g_settings.bgmVolume = static_cast<int>(SendMessageW(Control(kIdBgm), TBM_GETPOS, 0, 0));
     g_settings.mainVolume = static_cast<int>(SendMessageW(Control(kIdMain), TBM_GETPOS, 0, 0));
     g_settings.musicFloor = static_cast<int>(SendMessageW(Control(kIdFloor), TBM_GETPOS, 0, 0));
@@ -278,6 +281,18 @@ void PollSaveActivity() {
     AppendLog(L"The game saved in Save Slot " + std::to_wstring(activity.lastSavedSlot) + L".");
 }
 
+int AnswerSavePrompt(unsigned long pid, const std::wstring& installDirectory) {
+    static bool busy = false;
+    int activeSlot = 0;
+    if (busy || pid == 0 || !launcher::SavePromptPending(pid, activeSlot) || !launcher::AcceptSavePrompt(pid)) return -1;
+    busy = true;
+    const launcher::SlotChoice choice = launcher::PickSaveSlot(installDirectory, activeSlot, [pid] { return launcher::SavePromptOpen(pid); });
+    busy = false;
+    if (choice.withdrawn) return -1;
+    launcher::AnswerSavePrompt(pid, choice.slot);
+    return choice.slot;
+}
+
 std::wstring LauncherPath() {
     wchar_t buffer[MAX_PATH * 2];
     const DWORD length = GetModuleFileNameW(nullptr, buffer, static_cast<DWORD>(std::size(buffer)));
@@ -338,6 +353,7 @@ bool LaunchTitle(Settings& settings, HANDLE* process, const std::function<void(c
     environment.emplace_back(L"ORBIS_WINDOW_BORDERLESS", settings.borderless ? L"1" : L"");
     const int saveSlot = settings.saveSlot >= 1 && settings.saveSlot <= launcher::kSaveSlotCount ? settings.saveSlot : 1;
     environment.emplace_back(L"ORBIS_SAVE_SLOT", std::to_wstring(saveSlot));
+    environment.emplace_back(L"ORBIS_SAVE_PROMPT", settings.askSaveSlot ? L"1" : L"");
     std::error_code slotError;
     std::filesystem::create_directories(std::filesystem::path(settings.installDirectory) / L"savedata" / (L"slot_" + std::to_wstring(saveSlot)), slotError);
     environment.emplace_back(L"ORBIS_NGS2_TRACE", settings.diagnostics ? L"1" : L"");
@@ -400,7 +416,12 @@ int PlayDirect() {
     }
     launcher::DiscordPresence presence;
     StartPresence(presence, settings, process, [](const std::wstring&) {});
-    WaitForSingleObject(process, INFINITE);
+    const unsigned long pid = GetProcessId(process);
+    ui::Init();
+    while (WaitForSingleObject(process, 50) == WAIT_TIMEOUT) {
+        if (settings.askSaveSlot) AnswerSavePrompt(pid, settings.installDirectory);
+    }
+    ui::Shutdown();
     presence.Stop();
     CloseHandle(process);
     return 0;
@@ -704,7 +725,8 @@ void CreateControls() {
     AddCard(kPageSettings, 24, 462, 340, 176, L"SAVE SLOT");
     AddLabel(kPageSettings, 44, 496, 300, 16, L"Slot the game loads and saves in", ui::kFontSmall, ui::kText);
     AddButton(kPageSettings, kSaveSlotCaptions[SaveSlotIndex()], 44, 516, 300, 28, kIdSaveSlot);
-    AddLabel(kPageSettings, 44, 552, 300, 70, L"Each slot keeps its own saves in savedata\\slot_N and changing it never copies or deletes saves. While the game runs, the new slot is used from its next save, autosaves included.",
+    AddCheckbox(kPageSettings, L"Ask which slot when saving at the fairy", 44, 552, 300, kIdAskSaveSlot, g_settings.askSaveSlot);
+    AddLabel(kPageSettings, 44, 584, 300, 44, L"Each slot has its own saves. A running game uses a new slot from its next save.",
              ui::kFontSmall, ui::kMuted, DT_LEFT | DT_TOP | DT_WORDBREAK);
 
     AddCard(kPageSettings, 376, 462, 340, 176, L"AUDIO");
@@ -1048,6 +1070,20 @@ void ChooseSaveSlot() {
     }
 }
 
+void AnswerSavePromptInWindow() {
+    const int slot = AnswerSavePrompt(g_gamePid, g_settings.installDirectory);
+    if (slot < 0) return;
+    if (slot == 0) {
+        AppendLog(L"The save was canceled.");
+        return;
+    }
+    g_settings.saveSlot = slot;
+    SetWindowTextW(Control(kIdSaveSlot), kSaveSlotCaptions[SaveSlotIndex()]);
+    InvalidateRect(g_window, nullptr, FALSE);
+    PersistSettings();
+    AppendLog(L"Saving in Save Slot " + std::to_wstring(slot) + L".");
+}
+
 LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
     case WM_ERASEBKGND:
@@ -1117,6 +1153,7 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
             UpdateHover();
             if (++ticks % 20 == 0) RefreshGameRunning();
             if (ticks % 10 == 0) PollSaveActivity();
+            if (g_gamePid != 0) AnswerSavePromptInWindow();
             return 0;
         }
         break;

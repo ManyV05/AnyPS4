@@ -1,7 +1,9 @@
 #include <common/OrbisHle.hpp>
+#include "../../3rdparty/shadps4-ngs2/shims/AnyPS4LiveSave.hpp"
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 namespace {
@@ -30,6 +32,15 @@ constexpr u32 kFocusPosDirName = 6;
 constexpr u32 kButtonIdInvalid = 0;
 constexpr u32 kButtonIdOk = 1;
 constexpr u32 kAutoAnswerUpdates = 10;
+constexpr u32 kDispTypeSave = 1;
+constexpr s32 kResultOk = 0;
+constexpr s32 kResultUserCanceled = 1;
+constexpr int kSaveSlotCount = 5;
+constexpr ULONGLONG kPromptAnswerMilliseconds = 2000;
+constexpr std::int32_t kPromptIdle = 0;
+constexpr std::int32_t kPromptAsked = 1;
+constexpr std::int32_t kPromptShown = 2;
+constexpr std::int32_t kPromptAnswered = 3;
 
 struct DirName {
     char data[32];
@@ -125,6 +136,9 @@ char selection[32] = {};
 void* openedUserData = nullptr;
 u32 updatesSinceOpen = 0;
 u32 progressValue = 0;
+bool prompting = false;
+bool canceled = false;
+ULONGLONG promptAskedAt = 0;
 
 void Trace(const char* function, const char* nid) {
     static std::uint64_t calls = 0;
@@ -134,6 +148,77 @@ void Trace(const char* function, const char* nid) {
 void Log(const char* text) {
     std::fprintf(stderr, "[SaveDataDialog] %s\n", text);
     std::fflush(stderr);
+}
+
+anyps4::LiveSaveBlock* PromptBlock() {
+    const char* text = std::getenv("ORBIS_SAVE_SLOT");
+    const int slot = text != nullptr ? std::atoi(text) : 1;
+    return anyps4::LiveSaveBlockOfThisProcess(slot >= 1 && slot <= kSaveSlotCount ? slot : 1);
+}
+
+bool LauncherAlive(const anyps4::LiveSaveBlock& block) {
+    const auto pid = static_cast<DWORD>(block.launcherPid.load());
+    if (pid == 0) return false;
+    HANDLE process = OpenProcess(SYNCHRONIZE, FALSE, pid);
+    if (process == nullptr) return false;
+    const bool alive = WaitForSingleObject(process, 0) == WAIT_TIMEOUT;
+    CloseHandle(process);
+    return alive;
+}
+
+bool StartSlotPrompt() {
+    const char* enabled = std::getenv("ORBIS_SAVE_PROMPT");
+    if (enabled == nullptr || enabled[0] != '1') return false;
+    anyps4::LiveSaveBlock* block = PromptBlock();
+    if (block == nullptr) return false;
+    AllowSetForegroundWindow(ASFW_ANY);
+    block->promptChoice.store(0);
+    block->promptState.store(kPromptAsked);
+    promptAskedAt = GetTickCount64();
+    prompting = true;
+    return true;
+}
+
+void DropSlotPrompt(const char* reason) {
+    anyps4::LiveSaveBlock* block = PromptBlock();
+    if (block != nullptr) block->promptState.store(kPromptIdle);
+    prompting = false;
+    answersItself = true;
+    char text[160];
+    std::snprintf(text, sizeof text, "%s: saving in the current slot", reason);
+    Log(text);
+}
+
+void PollSlotPrompt() {
+    anyps4::LiveSaveBlock* block = PromptBlock();
+    if (block == nullptr) {
+        DropSlotPrompt("no live save block");
+        return;
+    }
+    switch (block->promptState.load()) {
+    case kPromptAsked:
+        if (GetTickCount64() - promptAskedAt > kPromptAnswerMilliseconds) DropSlotPrompt("the launcher did not answer the slot question");
+        break;
+    case kPromptShown:
+        if (!LauncherAlive(*block)) DropSlotPrompt("the launcher closed while asking for a slot");
+        break;
+    case kPromptAnswered: {
+        const int choice = block->promptChoice.load();
+        block->promptState.store(kPromptIdle);
+        prompting = false;
+        canceled = choice < 1 || choice > kSaveSlotCount;
+        if (!canceled) block->requestedSlot.store(choice);
+        status = kStatusFinished;
+        char text[120];
+        if (canceled) std::snprintf(text, sizeof text, "finished: the save was canceled in the slot question");
+        else std::snprintf(text, sizeof text, "finished: save slot %d chosen", choice);
+        Log(text);
+        break;
+    }
+    default:
+        DropSlotPrompt("the slot question was withdrawn");
+        break;
+    }
 }
 
 const char* ModeName(u32 mode) {
@@ -176,6 +261,8 @@ ORBIS_SYSV_ABI s32 orbis_sceSaveDataDialogOpen(const DialogParam* param) {
     std::memset(selection, 0, sizeof selection);
     answerButton = kButtonIdInvalid;
     answersItself = true;
+    prompting = false;
+    canceled = false;
     char detail[200] = {};
     const Items* items = param->items;
     if (items != nullptr) {
@@ -192,6 +279,7 @@ ORBIS_SYSV_ABI s32 orbis_sceSaveDataDialogOpen(const DialogParam* param) {
     switch (openedMode) {
     case kModeList:
         answerButton = kButtonIdInvalid;
+        if (param->dispType == kDispTypeSave && StartSlotPrompt()) answersItself = false;
         break;
     case kModeUserMsg: {
         const u32 buttonType = param->userMsgParam != nullptr ? param->userMsgParam->buttonType : 0;
@@ -222,13 +310,14 @@ ORBIS_SYSV_ABI s32 orbis_sceSaveDataDialogOpen(const DialogParam* param) {
     status = kStatusRunning;
     char text[400];
     std::snprintf(text, sizeof text, "open: mode %u (%s), display type %u%s; %s", openedMode, ModeName(openedMode), param->dispType, detail,
-                  answersItself ? "answered with the positive button after a few status updates" : "stays open until the title closes it");
+                  prompting ? "asks the launcher which save slot to use" : answersItself ? "answered with the positive button after a few status updates" : "stays open until the title closes it");
     Log(text);
     return 0;
 }
 
 ORBIS_SYSV_ABI s32 orbis_sceSaveDataDialogUpdateStatus() {
     Trace("sceSaveDataDialogUpdateStatus", "KK3Bdg1RWK0");
+    if (status == kStatusRunning && prompting) PollSlotPrompt();
     if (status == kStatusRunning && answersItself && ++updatesSinceOpen > kAutoAnswerUpdates) {
         status = kStatusFinished;
         char text[120];
@@ -253,7 +342,7 @@ ORBIS_SYSV_ABI s32 orbis_sceSaveDataDialogGetResult(DialogResult* result) {
     if (result == nullptr) return kErrorInvalidPointer;
     if (status != kStatusFinished) return kErrorNotFinished;
     result->mode = openedMode;
-    result->result = 0;
+    result->result = canceled ? kResultUserCanceled : kResultOk;
     result->buttonId = answerButton;
     result->userData = openedUserData;
     if (result->dirName != nullptr) {
@@ -265,6 +354,11 @@ ORBIS_SYSV_ABI s32 orbis_sceSaveDataDialogGetResult(DialogResult* result) {
 
 ORBIS_SYSV_ABI s32 orbis_sceSaveDataDialogClose() {
     Trace("sceSaveDataDialogClose", "fH46Lag88XY");
+    if (prompting) {
+        anyps4::LiveSaveBlock* block = PromptBlock();
+        if (block != nullptr) block->promptState.store(kPromptIdle);
+        prompting = false;
+    }
     if (status == kStatusRunning) {
         // Like the system (and shadPS4's SaveDialogUi::Finish): closing a running
         // dialog ends it with no button, FINISHED, and the title then polls

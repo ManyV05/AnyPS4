@@ -20,6 +20,9 @@ struct LiveSaveBlock {
     std::atomic<std::int32_t> activeSlot;
     std::atomic<std::int32_t> savesDone;
     std::atomic<std::int32_t> lastSavedSlot;
+    std::atomic<std::int32_t> promptState;
+    std::atomic<std::int32_t> promptChoice;
+    std::atomic<std::int32_t> launcherPid;
 };
 
 static_assert(std::atomic<std::int32_t>::is_always_lock_free, "the live save block is shared between processes");
@@ -43,6 +46,9 @@ inline LiveSaveBlock* LiveSaveBlockOfThisProcess(int initialSlot) {
             shared->activeSlot.store(initialSlot);
             shared->savesDone.store(0);
             shared->lastSavedSlot.store(0);
+            shared->promptState.store(0);
+            shared->promptChoice.store(0);
+            shared->launcherPid.store(0);
             shared->state.store(2);
         } else {
             while (shared->state.load() != 2) Sleep(0);

@@ -33,6 +33,7 @@ struct Settings {
     std::wstring resolution = L"1920x1080";
     bool borderless = false;
     int saveSlot = 1;
+    bool askSaveSlot = true;
     bool discordEnabled = true;
     std::wstring discordClientId;
     std::array<int, 24> keys{};
