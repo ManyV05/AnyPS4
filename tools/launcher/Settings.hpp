@@ -28,6 +28,8 @@ struct Settings {
     int musicFloor = 0;
     bool xinput = true;
     int language = 1;
+    std::wstring resolution = L"1920x1080";
+    bool borderless = false;
     bool discordEnabled = true;
     std::wstring discordClientId;
     std::array<int, 24> keys{};

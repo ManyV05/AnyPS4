@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <string>
@@ -193,6 +194,11 @@ std::wstring TitleBase() {
     return L"AnyPS4 - " + name;
 }
 
+u32 EnvironmentNumber(const char* name) {
+    const char* value = std::getenv(name);
+    return value != nullptr ? static_cast<u32>(std::strtoul(value, nullptr, 10)) : 0;
+}
+
 void WindowThread(u32 width, u32 height) {
     auto& state = Global();
     WNDCLASSW windowClass{};
@@ -203,12 +209,45 @@ void WindowThread(u32 width, u32 height) {
     RegisterClassW(&windowClass);
     const int screenWidth = GetSystemMetrics(SM_CXSCREEN);
     const int screenHeight = GetSystemMetrics(SM_CYSCREEN);
+    const u32 requestedWidth = EnvironmentNumber("ORBIS_WINDOW_WIDTH");
+    const u32 requestedHeight = EnvironmentNumber("ORBIS_WINDOW_HEIGHT");
+    const bool borderless = EnvironmentNumber("ORBIS_WINDOW_BORDERLESS") != 0;
+    DWORD style = WS_OVERLAPPEDWINDOW;
+    int x = CW_USEDEFAULT;
+    int y = CW_USEDEFAULT;
+    int outerWidth = 0;
+    int outerHeight = 0;
     double scale = 1.0;
-    while (width * scale > screenWidth * 0.9 || height * scale > screenHeight * 0.85) scale *= 0.5;
-    RECT rect{0, 0, static_cast<LONG>(width * scale), static_cast<LONG>(height * scale)};
-    AdjustWindowRect(&rect, WS_OVERLAPPEDWINDOW, FALSE);
-    HWND window = CreateWindowExW(0, windowClass.lpszClassName, TitleBase().c_str(), WS_OVERLAPPEDWINDOW | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT,
-                                  rect.right - rect.left, rect.bottom - rect.top, nullptr, nullptr, windowClass.hInstance, nullptr);
+    if (borderless) {
+        MONITORINFO monitor{};
+        monitor.cbSize = sizeof monitor;
+        GetMonitorInfoW(MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY), &monitor);
+        style = WS_POPUP;
+        x = monitor.rcMonitor.left;
+        y = monitor.rcMonitor.top;
+        outerWidth = monitor.rcMonitor.right - monitor.rcMonitor.left;
+        outerHeight = monitor.rcMonitor.bottom - monitor.rcMonitor.top;
+        scale = static_cast<double>(outerWidth) / width;
+    } else {
+        RECT frame{0, 0, 0, 0};
+        AdjustWindowRect(&frame, style, FALSE);
+        if (requestedWidth > 0 && requestedHeight > 0) {
+            RECT work{0, 0, screenWidth, screenHeight};
+            SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+            const double fitWidth = static_cast<double>(work.right - work.left - (frame.right - frame.left)) / requestedWidth;
+            const double fitHeight = static_cast<double>(work.bottom - work.top - (frame.bottom - frame.top)) / requestedHeight;
+            const double fit = std::min({1.0, fitWidth, fitHeight});
+            outerWidth = static_cast<int>(requestedWidth * fit) + (frame.right - frame.left);
+            outerHeight = static_cast<int>(requestedHeight * fit) + (frame.bottom - frame.top);
+            scale = static_cast<double>(requestedWidth * fit) / width;
+        } else {
+            while (width * scale > screenWidth * 0.9 || height * scale > screenHeight * 0.85) scale *= 0.5;
+            outerWidth = static_cast<int>(width * scale) + (frame.right - frame.left);
+            outerHeight = static_cast<int>(height * scale) + (frame.bottom - frame.top);
+        }
+    }
+    HWND window = CreateWindowExW(0, windowClass.lpszClassName, TitleBase().c_str(), style | WS_VISIBLE, x, y, outerWidth, outerHeight, nullptr, nullptr,
+                                  windowClass.hInstance, nullptr);
     {
         std::lock_guard guard(state.lock);
         state.window = window;

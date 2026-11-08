@@ -162,6 +162,19 @@ void DrawCheck(HDC dc, const RECT& box, COLORREF color) {
     graphics.DrawLines(&pen, points, 3);
 }
 
+void DrawChevron(HDC dc, const RECT& box, COLORREF color) {
+    Gdiplus::Graphics graphics(dc);
+    graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    const float w = static_cast<float>(box.right - box.left);
+    const float h = static_cast<float>(box.bottom - box.top);
+    Gdiplus::Pen pen(ToColor(color), std::max(1.6f, w / 7.0f));
+    pen.SetLineJoin(Gdiplus::LineJoinRound);
+    pen.SetStartCap(Gdiplus::LineCapRound);
+    pen.SetEndCap(Gdiplus::LineCapRound);
+    const Gdiplus::PointF points[3] = {{box.left + w * 0.1f, box.top + h * 0.3f}, {box.left + w * 0.5f, box.top + h * 0.72f}, {box.left + w * 0.9f, box.top + h * 0.3f}};
+    graphics.DrawLines(&pen, points, 3);
+}
+
 void DrawTrack(HDC dc, const RECT& track, int filledRight, COLORREF filled, COLORREF empty) {
     Gdiplus::Graphics graphics(dc);
     graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);

@@ -44,6 +44,9 @@ constexpr int kIdFloor = 114;
 constexpr int kIdLog = 118;
 constexpr int kIdDiagnostics = 119;
 constexpr int kIdSteam = 150;
+constexpr int kIdResolution = 190;
+constexpr int kIdBorderless = 191;
+constexpr int kIdResolutionItem = 195;
 constexpr int kIdDiscord = 160;
 constexpr int kIdDiscordId = 161;
 constexpr int kIdExportSaves = 170;
@@ -58,7 +61,7 @@ constexpr UINT kMessageLogLine = WM_APP + 1;
 constexpr UINT kMessageInstallDone = WM_APP + 2;
 constexpr UINT_PTR kTimerHover = 1;
 
-constexpr int kClientWidth = 900;
+constexpr int kClientWidth = 1180;
 constexpr int kClientHeight = 656;
 constexpr int kHeaderHeight = 96;
 
@@ -70,6 +73,8 @@ const wchar_t* const kPresentCaptions[3] = {L"Fifo", L"Mailbox", L"Immediate"};
 const int kFpsValues[3] = {30, 60, 0};
 const wchar_t* const kFpsCaptions[3] = {L"30 fps", L"60 fps", L"Unlimited"};
 const int kLanguageValues[2] = {1, 0};
+const wchar_t* const kResolutionValues[4] = {L"1280x720", L"1920x1080", L"2560x1440", L"3840x2160"};
+const wchar_t* const kResolutionCaptions[4] = {L"1280x720", L"1920x1080 (Default)", L"2560x1440", L"3840x2160"};
 const wchar_t* const kLanguageCaptions[2] = {L"English (US)", L"Japanese"};
 
 struct Label {
@@ -134,7 +139,7 @@ HWND Control(int id) {
 }
 
 bool IsCheckbox(int id) {
-    return id == kIdXInput || id == kIdDiscord || id == kIdValidation || id == kIdPipelineCache || id == kIdHeadless || id == kIdDiagnostics;
+    return id == kIdXInput || id == kIdBorderless || id == kIdDiscord || id == kIdValidation || id == kIdPipelineCache || id == kIdHeadless || id == kIdDiagnostics;
 }
 
 bool IsSlider(int id) {
@@ -179,6 +184,7 @@ void ReadControlsIntoSettings() {
     g_settings.gameDirectory = WindowText(Control(kIdGame));
     g_settings.installDirectory = WindowText(Control(kIdInstallDir));
     g_settings.xinput = g_checked[kIdXInput];
+    g_settings.borderless = g_checked[kIdBorderless];
     g_settings.discordEnabled = g_checked[kIdDiscord];
     std::wstring clientId = WindowText(Control(kIdDiscordId));
     clientId.erase(std::remove_if(clientId.begin(), clientId.end(), [](wchar_t c) { return iswspace(c) != 0; }), clientId.end());
@@ -244,7 +250,7 @@ void RefreshGameRunning() {
     }
     if (running == g_gameRunning) return;
     g_gameRunning = running;
-    RECT audio = ui::Rect(24, 476, 408, 162);
+    RECT audio = ui::Rect(376, 438, 340, 200);
     InvalidateRect(g_window, &audio, FALSE);
 }
 
@@ -300,6 +306,12 @@ bool LaunchTitle(Settings& settings, HANDLE* process, const std::function<void(c
     environment.emplace_back(L"ORBIS_PAD_CONFIG", launcher::PadConfigurationPath(settings));
     environment.emplace_back(L"ORBIS_SYSTEM_PARAM_LANGUAGE", std::to_wstring(settings.language));
     environment.emplace_back(L"ORBIS_SYSTEM_PARAM_ENTER_BUTTON_ASSIGN", L"1");
+    unsigned windowWidth = 0;
+    unsigned windowHeight = 0;
+    if (swscanf(settings.resolution.c_str(), L"%ux%u", &windowWidth, &windowHeight) != 2) windowWidth = windowHeight = 0;
+    environment.emplace_back(L"ORBIS_WINDOW_WIDTH", windowWidth != 0 ? std::to_wstring(windowWidth) : std::wstring());
+    environment.emplace_back(L"ORBIS_WINDOW_HEIGHT", windowHeight != 0 ? std::to_wstring(windowHeight) : std::wstring());
+    environment.emplace_back(L"ORBIS_WINDOW_BORDERLESS", settings.borderless ? L"1" : L"");
     environment.emplace_back(L"ORBIS_NGS2_TRACE", settings.diagnostics ? L"1" : L"");
     environment.emplace_back(L"ORBIS_GNM_DUMP_EVERY", settings.diagnostics ? L"3000" : L"");
     environment.emplace_back(L"ORBIS_GNM_LOG", settings.diagnostics ? L"info" : L"");
@@ -577,9 +589,16 @@ HWND AddField(int page, const std::wstring& text, int x, int y, int width, int h
     return edit;
 }
 
+int ResolutionIndex() {
+    for (int k = 0; k < 4; ++k) {
+        if (g_settings.resolution == kResolutionValues[k]) return k;
+    }
+    return 1;
+}
+
 void AddSlider(int page, int id, int labelY, std::function<std::wstring()> label, int value) {
-    AddLabel(page, 44, labelY, 368, 18, std::move(label), ui::kFontSmall, ui::kText);
-    HWND bar = AddChild(page, TRACKBAR_CLASSW, L"", TBS_HORZ | TBS_NOTICKS, 40, labelY + 18, 376, 26, id);
+    AddLabel(page, 396, labelY, 300, 18, std::move(label), ui::kFontSmall, ui::kText);
+    HWND bar = AddChild(page, TRACKBAR_CLASSW, L"", TBS_HORZ | TBS_NOTICKS, 392, labelY + 18, 308, 26, id);
     SendMessageW(bar, TBM_SETRANGE, TRUE, MAKELPARAM(0, 150));
     SendMessageW(bar, TBM_SETPOS, TRUE, value);
 }
@@ -590,77 +609,83 @@ void AddCheckbox(int page, const wchar_t* text, int x, int y, int width, int id,
 }
 
 void CreateControls() {
-    AddButton(-1, L"Home", 632, 32, 108, 36, kIdTabHome);
-    AddButton(-1, L"⚙  Settings", 748, 32, 128, 36, kIdTabSettings);
+    AddButton(-1, L"Home", 912, 32, 108, 36, kIdTabHome);
+    AddButton(-1, L"⚙  Settings", 1028, 32, 128, 36, kIdTabSettings);
 
-    AddCard(kPageHome, 24, 112, 852, 216, L"GAME");
-    AddLabel(kPageHome, 44, 150, 500, 18, L"Game folder (the one that contains eboot.bin)");
-    AddField(kPageHome, g_settings.gameDirectory, 44, 172, 652, 38, kIdGame);
-    AddButton(kPageHome, L"Browse...", 708, 172, 148, 38, kIdGameBrowse);
-    AddLabel(kPageHome, 44, 216, 812, 20, [] {
+    AddCard(kPageHome, 24, 112, 1132, 216, L"GAME");
+    AddLabel(kPageHome, 44, 150, 600, 18, L"Game folder (the one that contains eboot.bin)");
+    AddField(kPageHome, g_settings.gameDirectory, 44, 172, 932, 38, kIdGame);
+    AddButton(kPageHome, L"Browse...", 988, 172, 148, 38, kIdGameBrowse);
+    AddLabel(kPageHome, 44, 216, 1092, 20, [] {
         return g_installed ? std::wstring(L"Ready to play. Install again only if you move the game folder or change its files.")
                            : std::wstring(L"Pick your game folder, then press Install (it takes a few seconds). Your game files are never copied.");
     });
-    AddButton(kPageHome, L"PLAY", 44, 246, 276, 64, kIdPlay);
-    AddButton(kPageHome, L"Install", 332, 246, 150, 64, kIdInstall);
-    AddButton(kPageHome, L"Open install folder", 494, 246, 176, 64, kIdOpenFolder);
-    AddButton(kPageHome, L"Add to Steam", 682, 246, 174, 64, kIdSteam);
+    AddButton(kPageHome, L"PLAY", 44, 246, 400, 64, kIdPlay);
+    AddButton(kPageHome, L"Install", 456, 246, 200, 64, kIdInstall);
+    AddButton(kPageHome, L"Open install folder", 668, 246, 210, 64, kIdOpenFolder);
+    AddButton(kPageHome, L"Add to Steam", 890, 246, 246, 64, kIdSteam);
 
-    AddCard(kPageHome, 24, 344, 852, 296, L"ACTIVITY");
+    AddCard(kPageHome, 24, 344, 1132, 296, L"ACTIVITY");
     {
-        g_fields.push_back({kPageHome, ui::Rect(44, 384, 812, 240), nullptr});
-        g_log = AddChild(kPageHome, L"EDIT", L"", ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL, 52, 390, 796, 228, kIdLog);
+        g_fields.push_back({kPageHome, ui::Rect(44, 384, 1092, 240), nullptr});
+        g_log = AddChild(kPageHome, L"EDIT", L"", ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL, 52, 390, 1076, 228, kIdLog);
         g_fields.back().edit = g_log;
         SendMessageW(g_log, WM_SETFONT, reinterpret_cast<WPARAM>(ui::FontHandle(ui::kFontMono)), TRUE);
         ui::StyleScrollBars(g_log);
     }
 
-    AddCard(kPageSettings, 24, 112, 408, 140, L"PATHS AND SAVES");
-    AddLabel(kPageSettings, 44, 146, 368, 18, L"Install folder (outside the game folder)");
-    AddField(kPageSettings, g_settings.installDirectory, 44, 168, 250, 36, kIdInstallDir);
-    AddButton(kPageSettings, L"Browse...", 302, 168, 110, 36, kIdInstallBrowse);
-    AddButton(kPageSettings, L"Open folder", 44, 212, 110, 30, kIdOpenFolder + 1000);
-    AddButton(kPageSettings, L"Export Saves", 162, 212, 120, 30, kIdExportSaves);
-    AddButton(kPageSettings, L"Import Saves", 290, 212, 122, 30, kIdImportSaves);
+    AddCard(kPageSettings, 24, 112, 340, 140, L"PATHS AND SAVES");
+    AddLabel(kPageSettings, 44, 146, 300, 18, L"Install folder (outside the game folder)");
+    AddField(kPageSettings, g_settings.installDirectory, 44, 168, 190, 36, kIdInstallDir);
+    AddButton(kPageSettings, L"Browse...", 242, 168, 102, 36, kIdInstallBrowse);
+    AddButton(kPageSettings, L"Open folder", 44, 212, 92, 30, kIdOpenFolder + 1000);
+    AddButton(kPageSettings, L"Export Saves", 142, 212, 98, 30, kIdExportSaves);
+    AddButton(kPageSettings, L"Import Saves", 246, 212, 98, 30, kIdImportSaves);
 
-    AddCard(kPageSettings, 24, 264, 408, 200, L"GRAPHICS");
-    AddLabel(kPageSettings, 44, 300, 100, 28, L"Present mode", ui::kFontSmall, ui::kText);
-    for (int k = 0; k < 3; ++k) AddButton(kPageSettings, kPresentCaptions[k], 150 + k * 80, 300, 74, 28, kIdPresentBase + k);
-    AddLabel(kPageSettings, 44, 334, 100, 28, L"Frame limit", ui::kFontSmall, ui::kText);
-    for (int k = 0; k < 3; ++k) AddButton(kPageSettings, kFpsCaptions[k], 150 + k * 80, 334, 74, 28, kIdFpsBase + k);
-    AddLabel(kPageSettings, 44, 368, 100, 28, L"Game language", ui::kFontSmall, ui::kText);
-    for (int k = 0; k < 2; ++k) AddButton(kPageSettings, kLanguageCaptions[k], 150 + k * 114, 368, 108, 28, kIdLanguageBase + k);
-    AddCheckbox(kPageSettings, L"Persistent pipeline cache", 44, 406, 184, kIdPipelineCache, g_settings.pipelineCache);
-    AddCheckbox(kPageSettings, L"Vulkan validation layer", 232, 406, 192, kIdValidation, g_settings.validation);
-    AddCheckbox(kPageSettings, L"Headless (no rendering)", 44, 434, 184, kIdHeadless, g_settings.headless);
-    AddCheckbox(kPageSettings, L"Diagnostics", 232, 434, 192, kIdDiagnostics, g_settings.diagnostics);
+    AddCard(kPageSettings, 24, 264, 340, 186, L"GAME AND DISCORD");
+    AddLabel(kPageSettings, 44, 300, 92, 28, L"Game language", ui::kFontSmall, ui::kText);
+    for (int k = 0; k < 2; ++k) AddButton(kPageSettings, kLanguageCaptions[k], 140 + k * 102, 300, 98, 28, kIdLanguageBase + k);
+    AddCheckbox(kPageSettings, L"Discord Rich Presence while the game runs", 44, 342, 300, kIdDiscord, g_settings.discordEnabled);
+    AddLabel(kPageSettings, 44, 374, 300, 16, L"Discord application id (discord.com/developers)");
+    AddField(kPageSettings, g_settings.discordClientId, 44, 394, 300, 30, kIdDiscordId);
 
-    AddCard(kPageSettings, 24, 476, 408, 162, L"AUDIO");
-    AddLabel(kPageSettings, 150, 488, 262, 20, [] { return g_gameRunning ? std::wstring(L"Live: the running game follows these sliders") : std::wstring(L"Applied live while the game runs"); },
+    AddCard(kPageSettings, 376, 112, 340, 314, L"GRAPHICS");
+    AddLabel(kPageSettings, 396, 150, 88, 28, L"Present mode", ui::kFontSmall, ui::kText);
+    for (int k = 0; k < 3; ++k) AddButton(kPageSettings, kPresentCaptions[k], 488 + k * 70, 150, 66, 28, kIdPresentBase + k);
+    AddLabel(kPageSettings, 396, 186, 88, 28, L"Frame limit", ui::kFontSmall, ui::kText);
+    for (int k = 0; k < 3; ++k) AddButton(kPageSettings, kFpsCaptions[k], 488 + k * 70, 186, 66, 28, kIdFpsBase + k);
+    AddLabel(kPageSettings, 396, 222, 88, 28, L"Resolution", ui::kFontSmall, ui::kText);
+    AddButton(kPageSettings, kResolutionCaptions[ResolutionIndex()], 488, 222, 206, 28, kIdResolution);
+    AddCheckbox(kPageSettings, L"Borderless Fullscreen", 396, 260, 300, kIdBorderless, g_settings.borderless);
+    AddCheckbox(kPageSettings, L"Persistent pipeline cache", 396, 296, 300, kIdPipelineCache, g_settings.pipelineCache);
+    AddCheckbox(kPageSettings, L"Vulkan validation layer", 396, 326, 300, kIdValidation, g_settings.validation);
+    AddCheckbox(kPageSettings, L"Headless (no rendering)", 396, 356, 300, kIdHeadless, g_settings.headless);
+    AddCheckbox(kPageSettings, L"Diagnostics", 396, 386, 300, kIdDiagnostics, g_settings.diagnostics);
+    EnableWindow(Control(kIdResolution), g_settings.borderless ? FALSE : TRUE);
+
+    AddCard(kPageSettings, 376, 438, 340, 200, L"AUDIO");
+    AddLabel(kPageSettings, 456, 450, 240, 20, [] { return g_gameRunning ? std::wstring(L"Live: the running game follows these sliders") : std::wstring(L"Applied live while the game runs"); },
              ui::kFontSmall, ui::kMuted, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
-    AddSlider(kPageSettings, kIdBgm, 508, [] { return L"Music (BGM): " + std::to_wstring(SendMessageW(Control(kIdBgm), TBM_GETPOS, 0, 0)) + L" %"; }, g_settings.bgmVolume);
-    AddSlider(kPageSettings, kIdMain, 548, [] { return L"Voices and effects: " + std::to_wstring(SendMessageW(Control(kIdMain), TBM_GETPOS, 0, 0)) + L" %"; },
+    AddSlider(kPageSettings, kIdBgm, 486, [] { return L"Music (BGM): " + std::to_wstring(SendMessageW(Control(kIdBgm), TBM_GETPOS, 0, 0)) + L" %"; }, g_settings.bgmVolume);
+    AddSlider(kPageSettings, kIdMain, 528, [] { return L"Voices and effects: " + std::to_wstring(SendMessageW(Control(kIdMain), TBM_GETPOS, 0, 0)) + L" %"; },
               g_settings.mainVolume);
-    AddSlider(kPageSettings, kIdFloor, 588,
-              [] { return L"Music floor when the title mutes it (advanced): " + std::to_wstring(SendMessageW(Control(kIdFloor), TBM_GETPOS, 0, 0)) + L" %"; },
+    AddSlider(kPageSettings, kIdFloor, 570,
+              [] { return L"Music floor when the title mutes it: " + std::to_wstring(SendMessageW(Control(kIdFloor), TBM_GETPOS, 0, 0)) + L" %"; },
               g_settings.musicFloor);
 
-    AddCard(kPageSettings, 448, 112, 428, 526, L"CONTROLS");
-    AddLabel(kPageSettings, 468, 146, 388, 18, L"Click a key to change it. Escape cancels.");
+    AddCard(kPageSettings, 728, 112, 428, 526, L"CONTROLS");
+    AddLabel(kPageSettings, 748, 146, 388, 18, L"Click a key to change it. Escape cancels.");
     std::size_t count = 0;
     const anyps4::PadBinding* bindings = anyps4::PadBindings(count);
     for (std::size_t k = 0; k < count; ++k) {
         const int column = static_cast<int>(k / 12);
         const int row = static_cast<int>(k % 12);
-        const int x = 468 + column * 196;
+        const int x = 748 + column * 196;
         const int y = 176 + row * 28;
         AddLabel(kPageSettings, x, y, 104, 24, Widen(bindings[k].label).c_str(), ui::kFontSmall, ui::kText);
         AddButton(kPageSettings, Widen(anyps4::PadKeyName_(g_settings.keys[k]).c_str()).c_str(), x + 106, y, 82, 24, kIdKeyBase + static_cast<int>(k));
     }
-    AddCheckbox(kPageSettings, L"Use an XInput gamepad (slot 1) when connected", 468, 520, 380, kIdXInput, g_settings.xinput);
-    AddCheckbox(kPageSettings, L"Discord Rich Presence while the game runs", 468, 552, 380, kIdDiscord, g_settings.discordEnabled);
-    AddLabel(kPageSettings, 468, 582, 388, 16, L"Discord application id (create one at discord.com/developers)");
-    AddField(kPageSettings, g_settings.discordClientId, 468, 600, 388, 28, kIdDiscordId);
+    AddCheckbox(kPageSettings, L"Use an XInput gamepad (slot 1) when connected", 748, 520, 380, kIdXInput, g_settings.xinput);
 
     AppendLog(L"AnyPS4 launcher. Settings: " + launcher::SettingsPath());
     std::wstring bundle;
@@ -719,7 +744,7 @@ void PaintWindow(HDC dc, const RECT& client) {
         SelectObject(dc, previous);
         const int textWidth = measure.right - measure.left;
         const int dot = S(12);
-        const int right = S(856);
+        const int right = S(1136);
         const int top = S(124);
         const int rowHeight = S(24);
         const int left = right - textWidth - S(8) - dot;
@@ -742,10 +767,11 @@ void PaintWindow(HDC dc, const RECT& client) {
     }
 }
 
-enum class Kind { Primary, Secondary, Tab, Segment, Check, Key };
+enum class Kind { Primary, Secondary, Tab, Segment, Check, Key, Dropdown };
 
 Kind KindOf(int id) {
     if (id == kIdPlay) return Kind::Primary;
+    if (id == kIdResolution) return Kind::Dropdown;
     if (id == kIdTabHome || id == kIdTabSettings) return Kind::Tab;
     if ((id >= kIdPresentBase && id < kIdPresentBase + 3) || (id >= kIdFpsBase && id < kIdFpsBase + 3) || (id >= kIdLanguageBase && id < kIdLanguageBase + 2)) return Kind::Segment;
     if (IsCheckbox(id)) return Kind::Check;
@@ -757,6 +783,18 @@ bool IsSegmentSelected(int id) {
     if (id >= kIdPresentBase && id < kIdPresentBase + 3) return g_settings.presentMode == kPresentModes[id - kIdPresentBase];
     if (id >= kIdLanguageBase && id < kIdLanguageBase + 2) return g_settings.language == kLanguageValues[id - kIdLanguageBase];
     return g_settings.fpsCap == kFpsValues[id - kIdFpsBase];
+}
+
+void DrawResolutionItem(const DRAWITEMSTRUCT* item) {
+    const int index = static_cast<int>(item->itemData);
+    HDC dc = item->hDC;
+    const RECT r = item->rcItem;
+    ui::FillSolid(dc, r, (item->itemState & ODS_SELECTED) != 0 ? ui::kButtonHover : ui::kField);
+    if (index == ResolutionIndex()) {
+        const int size = S(14);
+        ui::DrawCheck(dc, RECT{r.left + S(10), r.top + (r.bottom - r.top - size) / 2, r.left + S(10) + size, r.top + (r.bottom - r.top - size) / 2 + size}, ui::kVioletLight);
+    }
+    ui::DrawTextLine(dc, kResolutionCaptions[index], RECT{r.left + S(34), r.top, r.right, r.bottom}, ui::kFontSmall, ui::kText, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 }
 
 void DrawButton(const DRAWITEMSTRUCT* item) {
@@ -806,7 +844,7 @@ void DrawButton(const DRAWITEMSTRUCT* item) {
     case Kind::Secondary: {
         const bool highlight = id == kIdInstall && !g_installed && !disabled;
         ui::FillRound(dc, r, S(12), pressed ? ui::kCard : (hover ? ui::kButtonHover : ui::kButton), highlight ? ui::kViolet : ui::kCardBorder);
-        ui::DrawTextLine(dc, caption, r, ui::kFontButton, disabled ? ui::kDisabled : ui::kText, center);
+        ui::DrawTextLine(dc, caption, r, width < S(130) ? ui::kFontSmall : ui::kFontButton, disabled ? ui::kDisabled : ui::kText, center);
         break;
     }
     case Kind::Tab: {
@@ -837,6 +875,14 @@ void DrawButton(const DRAWITEMSTRUCT* item) {
             ui::FillRound(dc, boxRect, S(5), ui::kField, hover ? ui::kViolet : ui::kFieldBorder);
         }
         ui::DrawTextLine(dc, caption, RECT{box + S(10), 0, width, height}, ui::kFontSmall, ui::kText, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        break;
+    }
+    case Kind::Dropdown: {
+        ui::FillRound(dc, r, S(8), pressed ? ui::kCard : (hover ? ui::kButtonHover : ui::kButton), ui::kCardBorder);
+        const COLORREF color = disabled ? ui::kDisabled : ui::kText;
+        ui::DrawTextLine(dc, caption, RECT{S(12), 0, width - S(30), height}, ui::kFontSmall, color, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        const int size = S(10);
+        ui::DrawChevron(dc, RECT{width - S(24), (height - size) / 2, width - S(24) + size, (height - size) / 2 + size}, color);
         break;
     }
     case Kind::Key: {
@@ -913,6 +959,25 @@ void PersistSettings() {
     launcher::SavePadConfiguration(g_settings);
 }
 
+void ChooseResolution() {
+    HMENU menu = CreatePopupMenu();
+    for (int k = 0; k < 4; ++k) AppendMenuW(menu, MF_OWNERDRAW, static_cast<UINT_PTR>(kIdResolutionItem + k), reinterpret_cast<LPCWSTR>(static_cast<ULONG_PTR>(k)));
+    MENUINFO info{};
+    info.cbSize = sizeof info;
+    info.fMask = MIM_BACKGROUND;
+    info.hbrBack = g_fieldBrush;
+    SetMenuInfo(menu, &info);
+    RECT button{};
+    GetWindowRect(Control(kIdResolution), &button);
+    const int chosen = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN, button.left, button.bottom + S(2), 0, g_window, nullptr);
+    DestroyMenu(menu);
+    if (chosen < kIdResolutionItem || chosen >= kIdResolutionItem + 4) return;
+    g_settings.resolution = kResolutionValues[chosen - kIdResolutionItem];
+    SetWindowTextW(Control(kIdResolution), kResolutionCaptions[chosen - kIdResolutionItem]);
+    InvalidateRect(Control(kIdResolution), nullptr, FALSE);
+    PersistSettings();
+}
+
 LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
     case WM_ERASEBKGND:
@@ -934,9 +999,22 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
         EndPaint(window, &paint);
         return 0;
     }
+    case WM_MEASUREITEM: {
+        auto* measure = reinterpret_cast<MEASUREITEMSTRUCT*>(lParam);
+        if (measure->CtlType == ODT_MENU) {
+            measure->itemWidth = static_cast<UINT>(S(206));
+            measure->itemHeight = static_cast<UINT>(S(30));
+            return TRUE;
+        }
+        break;
+    }
     case WM_DRAWITEM:
         if (reinterpret_cast<const DRAWITEMSTRUCT*>(lParam)->CtlType == ODT_BUTTON) {
             DrawButton(reinterpret_cast<const DRAWITEMSTRUCT*>(lParam));
+            return TRUE;
+        }
+        if (reinterpret_cast<const DRAWITEMSTRUCT*>(lParam)->CtlType == ODT_MENU) {
+            DrawResolutionItem(reinterpret_cast<const DRAWITEMSTRUCT*>(lParam));
             return TRUE;
         }
         break;
@@ -988,8 +1066,13 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
             return 0;
         }
         if (code != BN_CLICKED) break;
+        if (id == kIdResolution) {
+            ChooseResolution();
+            return 0;
+        }
         if (IsCheckbox(id)) {
             g_checked[id] = !g_checked[id];
+            if (id == kIdBorderless) EnableWindow(Control(kIdResolution), g_checked[id] ? FALSE : TRUE);
             InvalidateRect(Control(id), nullptr, FALSE);
             PersistSettings();
             return 0;
@@ -1060,7 +1143,7 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
     case WM_HSCROLL:
         for (const int id : {kIdBgm, kIdMain, kIdFloor}) InvalidateRect(Control(id), nullptr, FALSE);
         {
-            RECT audio = ui::Rect(24, 476, 408, 162);
+            RECT audio = ui::Rect(376, 438, 340, 200);
             InvalidateRect(window, &audio, FALSE);
         }
         if (g_gamePid != 0) {

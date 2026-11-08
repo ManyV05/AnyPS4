@@ -40,6 +40,7 @@ void HeaderBackdrop(HDC dc, const RECT& destination, int fullWidth, int fullHeig
 void FillEllipse(HDC dc, const RECT& box, COLORREF color);
 void FillTriangle(HDC dc, const RECT& box, COLORREF color);
 void DrawCheck(HDC dc, const RECT& box, COLORREF color);
+void DrawChevron(HDC dc, const RECT& box, COLORREF color);
 void DrawTrack(HDC dc, const RECT& track, int filledRight, COLORREF filled, COLORREF empty);
 void DrawTextLine(HDC dc, const std::wstring& text, RECT rect, Font font, COLORREF color, UINT flags);
 
