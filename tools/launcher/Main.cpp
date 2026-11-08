@@ -73,8 +73,9 @@ const wchar_t* const kPresentCaptions[3] = {L"Fifo", L"Mailbox", L"Immediate"};
 const int kFpsValues[3] = {30, 60, 0};
 const wchar_t* const kFpsCaptions[3] = {L"30 fps", L"60 fps", L"Unlimited"};
 const int kLanguageValues[2] = {1, 0};
-const wchar_t* const kResolutionValues[4] = {L"1280x720", L"1920x1080", L"2560x1440", L"3840x2160"};
-const wchar_t* const kResolutionCaptions[4] = {L"1280x720", L"1920x1080 (Default)", L"2560x1440", L"3840x2160"};
+constexpr int kResolutionCount = 5;
+const wchar_t* const kResolutionValues[kResolutionCount] = {L"1280x720", L"1920x1080", L"2560x1440", L"2560x1600", L"3840x2160"};
+const wchar_t* const kResolutionCaptions[kResolutionCount] = {L"1280x720", L"1920x1080 (Default)", L"2560x1440", L"2560x1600 (16:10)", L"3840x2160"};
 const wchar_t* const kLanguageCaptions[2] = {L"English (US)", L"Japanese"};
 
 struct Label {
@@ -590,7 +591,7 @@ HWND AddField(int page, const std::wstring& text, int x, int y, int width, int h
 }
 
 int ResolutionIndex() {
-    for (int k = 0; k < 4; ++k) {
+    for (int k = 0; k < kResolutionCount; ++k) {
         if (g_settings.resolution == kResolutionValues[k]) return k;
     }
     return 1;
@@ -961,7 +962,7 @@ void PersistSettings() {
 
 void ChooseResolution() {
     HMENU menu = CreatePopupMenu();
-    for (int k = 0; k < 4; ++k) AppendMenuW(menu, MF_OWNERDRAW, static_cast<UINT_PTR>(kIdResolutionItem + k), reinterpret_cast<LPCWSTR>(static_cast<ULONG_PTR>(k)));
+    for (int k = 0; k < kResolutionCount; ++k) AppendMenuW(menu, MF_OWNERDRAW, static_cast<UINT_PTR>(kIdResolutionItem + k), reinterpret_cast<LPCWSTR>(static_cast<ULONG_PTR>(k)));
     MENUINFO info{};
     info.cbSize = sizeof info;
     info.fMask = MIM_BACKGROUND;
@@ -971,7 +972,7 @@ void ChooseResolution() {
     GetWindowRect(Control(kIdResolution), &button);
     const int chosen = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN, button.left, button.bottom + S(2), 0, g_window, nullptr);
     DestroyMenu(menu);
-    if (chosen < kIdResolutionItem || chosen >= kIdResolutionItem + 4) return;
+    if (chosen < kIdResolutionItem || chosen >= kIdResolutionItem + kResolutionCount) return;
     g_settings.resolution = kResolutionValues[chosen - kIdResolutionItem];
     SetWindowTextW(Control(kIdResolution), kResolutionCaptions[chosen - kIdResolutionItem]);
     InvalidateRect(Control(kIdResolution), nullptr, FALSE);

@@ -207,6 +207,10 @@ void WindowThread(u32 width, u32 height) {
     windowClass.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
     windowClass.lpszClassName = L"AnyPS4VideoOut";
     RegisterClassW(&windowClass);
+    if (HMODULE user32 = GetModuleHandleW(L"user32.dll")) {
+        using SetAware = BOOL(WINAPI*)();
+        if (auto setAware = reinterpret_cast<SetAware>(reinterpret_cast<void*>(GetProcAddress(user32, "SetProcessDPIAware")))) setAware();
+    }
     const int screenWidth = GetSystemMetrics(SM_CXSCREEN);
     const int screenHeight = GetSystemMetrics(SM_CYSCREEN);
     const u32 requestedWidth = EnvironmentNumber("ORBIS_WINDOW_WIDTH");
@@ -219,18 +223,21 @@ void WindowThread(u32 width, u32 height) {
     int outerHeight = 0;
     double scale = 1.0;
     if (borderless) {
-        MONITORINFO monitor{};
-        monitor.cbSize = sizeof monitor;
-        GetMonitorInfoW(MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY), &monitor);
         style = WS_POPUP;
-        x = monitor.rcMonitor.left;
-        y = monitor.rcMonitor.top;
-        outerWidth = monitor.rcMonitor.right - monitor.rcMonitor.left;
-        outerHeight = monitor.rcMonitor.bottom - monitor.rcMonitor.top;
+        x = 0;
+        y = 0;
+        outerWidth = screenWidth;
+        outerHeight = screenHeight;
         scale = static_cast<double>(outerWidth) / width;
     } else {
         RECT frame{0, 0, 0, 0};
-        AdjustWindowRect(&frame, style, FALSE);
+        using AdjustForDpi = BOOL(WINAPI*)(LPRECT, DWORD, BOOL, DWORD, UINT);
+        using SystemDpi = UINT(WINAPI*)();
+        HMODULE user32 = GetModuleHandleW(L"user32.dll");
+        auto adjustForDpi = user32 != nullptr ? reinterpret_cast<AdjustForDpi>(reinterpret_cast<void*>(GetProcAddress(user32, "AdjustWindowRectExForDpi"))) : nullptr;
+        auto systemDpi = user32 != nullptr ? reinterpret_cast<SystemDpi>(reinterpret_cast<void*>(GetProcAddress(user32, "GetDpiForSystem"))) : nullptr;
+        if (adjustForDpi != nullptr && systemDpi != nullptr) adjustForDpi(&frame, style, FALSE, 0, systemDpi());
+        else AdjustWindowRect(&frame, style, FALSE);
         if (requestedWidth > 0 && requestedHeight > 0) {
             RECT work{0, 0, screenWidth, screenHeight};
             SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);

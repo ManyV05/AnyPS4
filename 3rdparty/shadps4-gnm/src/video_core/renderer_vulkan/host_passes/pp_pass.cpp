@@ -4,6 +4,7 @@
 #include "video_core/renderer_vulkan/host_passes/pp_pass.h"
 
 #include "common/assert.h"
+#include "common/logging/log.h"
 #include "core/emulator_settings.h"
 #include "video_core/host_shaders/fs_tri_vert.h"
 #include "video_core/host_shaders/post_process_frag.h"
@@ -12,6 +13,9 @@
 #include "video_core/renderer_vulkan/vk_shader_util.h"
 
 #include <boost/container/static_vector.hpp>
+#include <algorithm>
+#include <cmath>
+#include <cstdlib>
 
 namespace Vulkan::HostPasses {
 
@@ -238,10 +242,36 @@ void PostProcessingPass::Render(vk::CommandBuffer cmdbuf, vk::ImageView input,
 
     cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, *pipeline);
 
+    static const bool stretch = std::getenv("ORBIS_WINDOW_STRETCH") != nullptr;
+    s32 view_x = 0;
+    s32 view_y = 0;
+    u32 view_width = frame.width;
+    u32 view_height = frame.height;
+    if (!stretch && input_size.width != 0 && input_size.height != 0 && frame.width != 0 && frame.height != 0) {
+        if (static_cast<u64>(frame.width) * input_size.height > static_cast<u64>(frame.height) * input_size.width) {
+            view_width = static_cast<u32>(std::lround(static_cast<double>(frame.height) * input_size.width / input_size.height));
+        } else {
+            view_height = static_cast<u32>(std::lround(static_cast<double>(frame.width) * input_size.height / input_size.width));
+        }
+        view_width = std::min(std::max(view_width, 1u), frame.width);
+        view_height = std::min(std::max(view_height, 1u), frame.height);
+        view_x = static_cast<s32>((frame.width - view_width) / 2);
+        view_y = static_cast<s32>((frame.height - view_height) / 2);
+    }
+    static u64 logged_rect = 0;
+    const u64 rect_key = (static_cast<u64>(view_width) << 48) ^ (static_cast<u64>(view_height) << 32) ^ (static_cast<u64>(frame.width) << 16) ^ frame.height;
+    if (rect_key != logged_rect) {
+        logged_rect = rect_key;
+        LOG_INFO(Render_Vulkan, "presenting {}x{} inside a {}x{} frame at ({}, {})", view_width, view_height, frame.width, frame.height, view_x,
+                 view_y);
+    }
+
     const std::array viewports = {
         vk::Viewport{
-            .width = static_cast<float>(frame.width),
-            .height = static_cast<float>(frame.height),
+            .x = static_cast<float>(view_x),
+            .y = static_cast<float>(view_y),
+            .width = static_cast<float>(view_width),
+            .height = static_cast<float>(view_height),
             .minDepth = 0.0f,
             .maxDepth = 1.0f,
         },
@@ -249,9 +279,13 @@ void PostProcessingPass::Render(vk::CommandBuffer cmdbuf, vk::ImageView input,
 
     cmdbuf.setViewport(0, viewports);
     cmdbuf.setScissor(0, vk::Rect2D{
+                             .offset{
+                                 .x = view_x,
+                                 .y = view_y,
+                             },
                              .extent{
-                                 .width = frame.width,
-                                 .height = frame.height,
+                                 .width = view_width,
+                                 .height = view_height,
                              },
                          });
 

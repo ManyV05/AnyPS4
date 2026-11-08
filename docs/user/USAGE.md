@@ -67,7 +67,11 @@ Discord needs an application id for this: create an application named after the 
 
 ## Window size and fullscreen
 
-**Resolution** and **Borderless Fullscreen** in Settings (Graphics) choose how the game window opens. The resolution list has 1280x720, 1920x1080 (the default), 2560x1440 and 3840x2160 and sets the size of the window's drawing area; the title itself always renders at its own resolution and the renderer scales the picture to the window. A size that does not fit on the screen is reduced, keeping its proportions. Borderless Fullscreen opens a window without title bar or frame that covers the whole primary monitor, and the resolution list is then ignored. The launcher saves them in `launcher.ini` (`resolution=1920x1080`, `borderless=0`) and starts the game with `ORBIS_WINDOW_WIDTH`, `ORBIS_WINDOW_HEIGHT` and `ORBIS_WINDOW_BORDERLESS`, which `libSceVideoOut.prx` reads when it creates the window; without them the window is sized as before. The libraries have to come from this version: run Install again (or use the standalone package of this version).
+**Resolution** and **Borderless Fullscreen** in Settings (Graphics) choose how the game window opens. The resolution list has 1280x720, 1920x1080 (the default), 2560x1440, 2560x1600 (16:10) and 3840x2160, and sets the size in real screen pixels of the window's drawing area (the game window is aware of the display scaling, so a size is not enlarged by it); a size that does not fit on the screen is reduced, keeping its proportions. Borderless Fullscreen opens a window without title bar or frame that covers the whole primary monitor, at the monitor's real resolution (`GetSystemMetrics`), and the resolution list is then ignored.
+
+The title renders at its own resolution (1920x1080) and the renderer presents it inside the window keeping its proportions: on a 16:10 monitor such as 2560x1600 the picture is 2560x1440 with black bars above and below, and the same happens when a window is resized to another shape. `ORBIS_WINDOW_STRETCH=1` brings back the old behaviour, which stretches the picture over the whole window.
+
+The launcher saves the choices in `launcher.ini` (`resolution=1920x1080`, `borderless=0`) and starts the game with `ORBIS_WINDOW_WIDTH`, `ORBIS_WINDOW_HEIGHT` and `ORBIS_WINDOW_BORDERLESS`, which `libSceVideoOut.prx` reads when it creates the window; without them the window is sized as before. The libraries have to come from this version: run Install again (or use the standalone package of this version).
 
 ## Runtime layout
 
