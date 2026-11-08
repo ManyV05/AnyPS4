@@ -299,6 +299,7 @@ bool LaunchTitle(Settings& settings, HANDLE* process, const std::function<void(c
     environment.emplace_back(L"ORBIS_NGS2_MUSIC_FLOOR", number);
     environment.emplace_back(L"ORBIS_PAD_CONFIG", launcher::PadConfigurationPath(settings));
     environment.emplace_back(L"ORBIS_SYSTEM_PARAM_LANGUAGE", std::to_wstring(settings.language));
+    environment.emplace_back(L"ORBIS_SYSTEM_PARAM_ENTER_BUTTON_ASSIGN", L"1");
     environment.emplace_back(L"ORBIS_NGS2_TRACE", settings.diagnostics ? L"1" : L"");
     environment.emplace_back(L"ORBIS_GNM_DUMP_EVERY", settings.diagnostics ? L"3000" : L"");
     environment.emplace_back(L"ORBIS_GNM_LOG", settings.diagnostics ? L"info" : L"");

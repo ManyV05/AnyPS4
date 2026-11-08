@@ -488,8 +488,8 @@ STUB_IMPLEMENTATIONS: dict[str, tuple[str, str, str]] = {
                                "if (details != nullptr) { const std::size_t size = *reinterpret_cast<const std::size_t*>(details); if (size != 0 && size <= 4096) { std::memset(details + 8, 0, size - 8); } } if (data != nullptr) { const std::size_t size = *reinterpret_cast<const std::size_t*>(data); if (size != 0 && size <= 4096) { std::memset(data + 8, 0, size - 8); } } return 0;"),
     "sceNpTrophyGetTrophyUnlockState": ("std::int32_t", "std::int32_t, std::int32_t, std::uint8_t* flags, std::uint32_t* count", "if (flags != nullptr) std::memset(flags, 0, 16); if (count != nullptr) *count = 0; return 0;"),
     "sceNpTrophyUnlockTrophy": ("std::int32_t", "std::int32_t, std::int32_t, std::int32_t, std::int32_t* platinumId", "if (platinumId != nullptr) *platinumId = -1; return 0;"),
-    "sceSystemServiceParamGetInt": ("std::int32_t", "std::int32_t paramId, std::int32_t* value", "if (value == nullptr) return static_cast<std::int32_t>(0x80A10003); switch (paramId) { case 1: { const char* configured = std::getenv(\"ORBIS_SYSTEM_PARAM_LANGUAGE\"); const int language = configured != nullptr && configured[0] != '\\0' ? std::atoi(configured) : 1; *value = language >= 0 && language <= 29 ? language : 1; break; } case 2: *value = 2; break; case 3: *value = 0; break; case 4: *value = -360; break; case 5: *value = 0; break; case 6: *value = 0; break; case 7: *value = 0; break; case 1000: *value = 1; break; default: *value = 0; break; } return 0;"),
-    "sceAppContentAppParamGetInt": ("std::int32_t", "std::uint32_t paramId, std::int32_t* value", "if (value == nullptr) return static_cast<std::int32_t>(0x80D90002); *value = paramId == 0 ? 3 : 0; return 0;"),
+    "sceSystemServiceParamGetInt": ("std::int32_t", "std::int32_t paramId, std::int32_t* value", "if (value == nullptr) return static_cast<std::int32_t>(0x80A10003); switch (paramId) { case 1: { const char* configured = std::getenv(\"ORBIS_SYSTEM_PARAM_LANGUAGE\"); const int language = configured != nullptr && configured[0] != '\\0' ? std::atoi(configured) : 1; *value = language >= 0 && language <= 29 ? language : 1; break; } case 2: *value = 2; break; case 3: *value = 0; break; case 4: *value = -360; break; case 5: *value = 0; break; case 6: *value = 0; break; case 7: *value = 0; break; case 1000: { const char* assigned = std::getenv(\"ORBIS_SYSTEM_PARAM_ENTER_BUTTON_ASSIGN\"); *value = assigned != nullptr && assigned[0] == '0' ? 0 : 1; break; } default: *value = 0; break; } return 0;"),
+    "sceAppContentAppParamGetInt": ("std::int32_t", "std::uint32_t paramId, std::int32_t* value", "if (value == nullptr) return static_cast<std::int32_t>(0x80D90002); *value = paramId == 0 ? 3 : (paramId >= 1 && paramId <= 4 ? OrbisUserDefinedParam(static_cast<std::int32_t>(paramId)) : 0); return 0;"),
     "sceAppContentGetAddcontInfoList": ("std::int32_t", "std::uint32_t, void*, std::uint32_t, std::uint32_t* hitNum", "if (hitNum != nullptr) *hitNum = 0; return 0;"),
     "scePlayGoGetLocus": ("std::int32_t", "std::int32_t, const std::uint16_t*, std::uint32_t count, std::int8_t* loci",
                           "if (loci == nullptr) return static_cast<std::int32_t>(0x80B20002); for (std::uint32_t k = 0; k < count; ++k) loci[k] = 3; return 0;"),
@@ -611,6 +611,7 @@ COMMON_HEADER = """#ifndef CORE_LIBS_ORBIS_COMMON_ORBISHLE_HPP
 #define ORBIS_SYSV_ABI __attribute__((sysv_abi))
 
 extern "C" void OrbisHleTrace(const char* module, const char* function, const char* nid, std::uint64_t calls, const void* site);
+extern "C" std::int32_t OrbisUserDefinedParam(std::int32_t index);
 
 #define ORBIS_HLE_STUB(module, identifier, display, nid) \\
     ORBIS_SYSV_ABI std::int64_t identifier() { \\
@@ -662,6 +663,71 @@ extern "C" void OrbisHleTrace(const char* module, const char* function, const ch
     std::fprintf(stderr, "[HLE] %s: %s (NID %s) call #%llu thread %lu from 0x%llx\\n", module, function, nid, static_cast<unsigned long long>(calls),
                  static_cast<unsigned long>(GetCurrentThreadId()), static_cast<unsigned long long>(offset));
     std::fflush(stderr);
+}
+
+namespace {
+
+struct UserParams {
+    std::int32_t values[4];
+};
+
+std::uint32_t ReadLittle32(const unsigned char* data, std::size_t size, std::size_t offset) {
+    if (offset + 4 > size) return 0;
+    return static_cast<std::uint32_t>(data[offset]) | (static_cast<std::uint32_t>(data[offset + 1]) << 8) | (static_cast<std::uint32_t>(data[offset + 2]) << 16) |
+           (static_cast<std::uint32_t>(data[offset + 3]) << 24);
+}
+
+HANDLE OpenParamSfo() {
+    wchar_t path[MAX_PATH + 32];
+    const DWORD length = GetModuleFileNameW(nullptr, path, MAX_PATH);
+    if (length != 0 && length < MAX_PATH) {
+        wchar_t* slash = wcsrchr(path, L'\\\\');
+        if (slash != nullptr) {
+            wcscpy(slash + 1, L"app0\\\\sce_sys\\\\param.sfo");
+            HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (file != INVALID_HANDLE_VALUE) return file;
+        }
+    }
+    return CreateFileW(L"app0\\\\sce_sys\\\\param.sfo", GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+}
+
+UserParams LoadUserParams() {
+    UserParams result = {};
+    HANDLE file = OpenParamSfo();
+    if (file == INVALID_HANDLE_VALUE) return result;
+    const DWORD size = GetFileSize(file, nullptr);
+    unsigned char* data = size != INVALID_FILE_SIZE && size >= 20 && size <= (1u << 20) ? static_cast<unsigned char*>(std::malloc(size)) : nullptr;
+    DWORD got = 0;
+    if (data != nullptr && (!ReadFile(file, data, size, &got, nullptr) || got != size)) {
+        std::free(data);
+        data = nullptr;
+    }
+    CloseHandle(file);
+    if (data == nullptr) return result;
+    static const char prefix[] = "USER_DEFINED_PARAM_";
+    if (data[1] == 'P' && data[2] == 'S' && data[3] == 'F') {
+        const std::size_t keyTable = ReadLittle32(data, size, 8);
+        const std::size_t dataTable = ReadLittle32(data, size, 12);
+        const std::uint32_t count = ReadLittle32(data, size, 16);
+        for (std::uint32_t entry = 0; entry < count && 20 + static_cast<std::size_t>(entry) * 16 + 16 <= size; ++entry) {
+            const std::size_t record = 20 + static_cast<std::size_t>(entry) * 16;
+            const std::size_t keyOffset = keyTable + (static_cast<std::size_t>(data[record]) | (static_cast<std::size_t>(data[record + 1]) << 8));
+            const std::uint32_t format = static_cast<std::uint32_t>(data[record + 2]) | (static_cast<std::uint32_t>(data[record + 3]) << 8);
+            if (format != 0x404 || keyOffset + sizeof prefix + 1 > size) continue;
+            const char* key = reinterpret_cast<const char*>(data) + keyOffset;
+            if (std::strncmp(key, prefix, sizeof prefix - 1) != 0 || key[sizeof prefix] != '\\0' || key[sizeof prefix - 1] < '1' || key[sizeof prefix - 1] > '4') continue;
+            result.values[key[sizeof prefix - 1] - '1'] = static_cast<std::int32_t>(ReadLittle32(data, size, dataTable + ReadLittle32(data, size, record + 12)));
+        }
+    }
+    std::free(data);
+    return result;
+}
+
+}
+
+extern "C" std::int32_t OrbisUserDefinedParam(std::int32_t index) {
+    static const UserParams params = LoadUserParams();
+    return index >= 1 && index <= 4 ? params.values[index - 1] : 0;
 }
 """
 
