@@ -3,6 +3,7 @@
 #include <shlobj.h>
 #include <shobjidl.h>
 #include <shellapi.h>
+#include <algorithm>
 #include <cwctype>
 #include <filesystem>
 #include <functional>
@@ -12,9 +13,13 @@
 #include <vector>
 
 #include "Bundle.hpp"
+#include "DiscordPresence.hpp"
+#include "LiveAudio.hpp"
 #include "PadKeyNames.hpp"
 #include "Process.hpp"
+#include "SaveBackup.hpp"
 #include "Settings.hpp"
+#include "SteamIntegration.hpp"
 #include "Ui.hpp"
 
 namespace {
@@ -38,10 +43,16 @@ constexpr int kIdMain = 113;
 constexpr int kIdFloor = 114;
 constexpr int kIdLog = 118;
 constexpr int kIdDiagnostics = 119;
+constexpr int kIdSteam = 150;
+constexpr int kIdDiscord = 160;
+constexpr int kIdDiscordId = 161;
+constexpr int kIdExportSaves = 170;
+constexpr int kIdImportSaves = 171;
 constexpr int kIdTabHome = 130;
 constexpr int kIdTabSettings = 131;
-constexpr int kIdPresentBase = 140;  // three segments: Fifo, Mailbox, Immediate
-constexpr int kIdFpsBase = 145;      // three segments: 30 fps, 60 fps, unlimited
+constexpr int kIdPresentBase = 140;
+constexpr int kIdLanguageBase = 180;
+constexpr int kIdFpsBase = 145;
 constexpr int kIdKeyBase = 200;
 constexpr UINT kMessageLogLine = WM_APP + 1;
 constexpr UINT kMessageInstallDone = WM_APP + 2;
@@ -58,6 +69,8 @@ const wchar_t* const kPresentModes[3] = {L"Fifo", L"Mailbox", L"Immediate"};
 const wchar_t* const kPresentCaptions[3] = {L"Fifo", L"Mailbox", L"Immediate"};
 const int kFpsValues[3] = {30, 60, 0};
 const wchar_t* const kFpsCaptions[3] = {L"30 fps", L"60 fps", L"Unlimited"};
+const int kLanguageValues[2] = {1, 0};
+const wchar_t* const kLanguageCaptions[2] = {L"English (US)", L"Japanese"};
 
 struct Label {
     int page;
@@ -90,6 +103,11 @@ int g_capturing = -1;
 int g_page = kPageHome;
 bool g_installing = false;
 bool g_installed = false;
+bool g_onSteam = false;
+bool g_gameRunning = false;
+HANDLE g_gameProcess = nullptr;
+unsigned long g_gamePid = 0;
+launcher::DiscordPresence g_presence;
 bool g_ready = false;
 std::map<int, bool> g_checked;
 std::vector<Label> g_labels;
@@ -116,7 +134,7 @@ HWND Control(int id) {
 }
 
 bool IsCheckbox(int id) {
-    return id == kIdXInput || id == kIdValidation || id == kIdPipelineCache || id == kIdHeadless || id == kIdDiagnostics;
+    return id == kIdXInput || id == kIdDiscord || id == kIdValidation || id == kIdPipelineCache || id == kIdHeadless || id == kIdDiagnostics;
 }
 
 bool IsSlider(int id) {
@@ -161,6 +179,10 @@ void ReadControlsIntoSettings() {
     g_settings.gameDirectory = WindowText(Control(kIdGame));
     g_settings.installDirectory = WindowText(Control(kIdInstallDir));
     g_settings.xinput = g_checked[kIdXInput];
+    g_settings.discordEnabled = g_checked[kIdDiscord];
+    std::wstring clientId = WindowText(Control(kIdDiscordId));
+    clientId.erase(std::remove_if(clientId.begin(), clientId.end(), [](wchar_t c) { return iswspace(c) != 0; }), clientId.end());
+    g_settings.discordClientId = clientId;
     g_settings.validation = g_checked[kIdValidation];
     g_settings.pipelineCache = g_checked[kIdPipelineCache];
     g_settings.headless = g_checked[kIdHeadless];
@@ -176,15 +198,15 @@ bool IsTitleExecutable(const std::filesystem::path& path) {
     return path.extension() == L".exe" && name.rfind(L"anyps4_launcher", 0) != 0 && name.rfind(L"relinker", 0) != 0 && name.find(L"_dbg") == std::wstring::npos;
 }
 
-std::wstring FindExecutable() {
+std::wstring FindExecutable(const Settings& settings) {
     std::error_code error;
-    if (!g_settings.executable.empty() && std::filesystem::exists(g_settings.executable, error) && IsTitleExecutable(g_settings.executable) &&
-        std::filesystem::equivalent(std::filesystem::path(g_settings.executable).parent_path(), g_settings.installDirectory, error)) {
-        return g_settings.executable;
+    if (!settings.executable.empty() && std::filesystem::exists(settings.executable, error) && IsTitleExecutable(settings.executable) &&
+        std::filesystem::equivalent(std::filesystem::path(settings.executable).parent_path(), settings.installDirectory, error)) {
+        return settings.executable;
     }
     std::filesystem::path newest;
     std::filesystem::file_time_type newestTime{};
-    for (const auto& entry : std::filesystem::directory_iterator(g_settings.installDirectory, error)) {
+    for (const auto& entry : std::filesystem::directory_iterator(settings.installDirectory, error)) {
         if (!entry.is_regular_file(error) || !IsTitleExecutable(entry.path())) continue;
         std::filesystem::path registry = entry.path();
         registry.replace_extension(L".registry.json");
@@ -198,7 +220,40 @@ std::wstring FindExecutable() {
     return newest.wstring();
 }
 
-// The title is playable when the install folder holds its executable and the runtime libraries.
+std::wstring FindExecutable() {
+    return FindExecutable(g_settings);
+}
+
+void ForgetGame() {
+    if (g_gameProcess != nullptr) CloseHandle(g_gameProcess);
+    g_gameProcess = nullptr;
+    g_gamePid = 0;
+}
+
+void RefreshGameRunning() {
+    bool running = false;
+    if (g_gameProcess != nullptr) {
+        if (WaitForSingleObject(g_gameProcess, 0) == WAIT_TIMEOUT) running = true;
+        else ForgetGame();
+    }
+    if (g_gameProcess != nullptr) {
+        g_gamePid = GetProcessId(g_gameProcess);
+    } else {
+        g_gamePid = launcher::FindRunningTitle(FindExecutable());
+        running = g_gamePid != 0;
+    }
+    if (running == g_gameRunning) return;
+    g_gameRunning = running;
+    RECT audio = ui::Rect(24, 476, 408, 162);
+    InvalidateRect(g_window, &audio, FALSE);
+}
+
+std::wstring LauncherPath() {
+    wchar_t buffer[MAX_PATH * 2];
+    const DWORD length = GetModuleFileNameW(nullptr, buffer, static_cast<DWORD>(std::size(buffer)));
+    return std::wstring(buffer, length);
+}
+
 void RefreshStatus() {
     if (!g_ready) return;
     ReadControlsIntoSettings();
@@ -206,6 +261,8 @@ void RefreshStatus() {
     const std::wstring executable = g_settings.installDirectory.empty() ? std::wstring() : FindExecutable();
     g_installed = !executable.empty() && std::filesystem::exists(executable, error) &&
                   std::filesystem::exists(std::filesystem::path(g_settings.installDirectory) / L"libs" / L"libkernel.prx", error);
+    g_onSteam = launcher::IsOnSteam(LauncherPath());
+    SetWindowTextW(Control(kIdSteam), g_onSteam ? L"Update Steam entry" : L"Add to Steam");
     EnableWindow(Control(kIdPlay), g_installed ? TRUE : FALSE);
     InvalidateRect(Control(kIdPlay), nullptr, FALSE);
     InvalidateRect(Control(kIdInstall), nullptr, FALSE);
@@ -219,36 +276,34 @@ std::wstring SuggestInstallDirectory(const std::wstring& gameFolder) {
                                              : (std::filesystem::path(g_settings.repoRoot).parent_path() / (L"AnyPS4-" + name)).wstring();
 }
 
-void Play() {
-    ReadControlsIntoSettings();
-    launcher::SaveSettings(g_settings);
-    launcher::SavePadConfiguration(g_settings);
-    const std::wstring executable = FindExecutable();
+bool LaunchTitle(Settings& settings, HANDLE* process, const std::function<void(const std::wstring&)>& log) {
+    const std::wstring executable = FindExecutable(settings);
     if (executable.empty()) {
-        AppendLog(L"No executable in the install folder yet: run Install first.");
-        return;
+        log(L"No executable in the install folder yet: run Install first.");
+        return false;
     }
-    g_settings.executable = executable;
+    settings.executable = executable;
     wchar_t number[32];
     std::vector<std::pair<std::wstring, std::wstring>> environment;
-    environment.emplace_back(L"APS5_NO_WRITE_WATCH", g_settings.writeWatch ? L"" : L"1");
-    environment.emplace_back(L"ORBIS_GNM_PRESENT_MODE", g_settings.presentMode);
-    environment.emplace_back(L"ORBIS_RENDER_FPS_CAP", std::to_wstring(g_settings.fpsCap));
-    environment.emplace_back(L"ORBIS_GNM_VALIDATION", g_settings.validation ? L"1" : L"");
-    environment.emplace_back(L"ORBIS_GNM_NO_PIPELINE_CACHE", g_settings.pipelineCache ? L"" : L"1");
-    environment.emplace_back(L"ORBIS_GNM_HEADLESS", g_settings.headless ? L"1" : L"");
-    swprintf(number, 32, L"%.2f", g_settings.bgmVolume / 100.0);
+    environment.emplace_back(L"APS5_NO_WRITE_WATCH", settings.writeWatch ? L"" : L"1");
+    environment.emplace_back(L"ORBIS_GNM_PRESENT_MODE", settings.presentMode);
+    environment.emplace_back(L"ORBIS_RENDER_FPS_CAP", std::to_wstring(settings.fpsCap));
+    environment.emplace_back(L"ORBIS_GNM_VALIDATION", settings.validation ? L"1" : L"");
+    environment.emplace_back(L"ORBIS_GNM_NO_PIPELINE_CACHE", settings.pipelineCache ? L"" : L"1");
+    environment.emplace_back(L"ORBIS_GNM_HEADLESS", settings.headless ? L"1" : L"");
+    swprintf(number, 32, L"%.2f", settings.bgmVolume / 100.0);
     environment.emplace_back(L"ORBIS_AUDIO_BGM_GAIN", number);
-    swprintf(number, 32, L"%.2f", g_settings.mainVolume / 100.0);
+    swprintf(number, 32, L"%.2f", settings.mainVolume / 100.0);
     environment.emplace_back(L"ORBIS_AUDIO_MAIN_GAIN", number);
-    swprintf(number, 32, L"%.2f", g_settings.musicFloor / 100.0);
+    swprintf(number, 32, L"%.2f", settings.musicFloor / 100.0);
     environment.emplace_back(L"ORBIS_NGS2_MUSIC_FLOOR", number);
-    environment.emplace_back(L"ORBIS_PAD_CONFIG", launcher::PadConfigurationPath(g_settings));
-    environment.emplace_back(L"ORBIS_NGS2_TRACE", g_settings.diagnostics ? L"1" : L"");
-    environment.emplace_back(L"ORBIS_GNM_DUMP_EVERY", g_settings.diagnostics ? L"3000" : L"");
-    environment.emplace_back(L"ORBIS_GNM_LOG", g_settings.diagnostics ? L"info" : L"");
+    environment.emplace_back(L"ORBIS_PAD_CONFIG", launcher::PadConfigurationPath(settings));
+    environment.emplace_back(L"ORBIS_SYSTEM_PARAM_LANGUAGE", std::to_wstring(settings.language));
+    environment.emplace_back(L"ORBIS_NGS2_TRACE", settings.diagnostics ? L"1" : L"");
+    environment.emplace_back(L"ORBIS_GNM_DUMP_EVERY", settings.diagnostics ? L"3000" : L"");
+    environment.emplace_back(L"ORBIS_GNM_LOG", settings.diagnostics ? L"info" : L"");
     std::error_code logError;
-    const std::filesystem::path logDirectory = std::filesystem::path(g_settings.installDirectory) / L"anyps4" / L"log";
+    const std::filesystem::path logDirectory = std::filesystem::path(settings.installDirectory) / L"anyps4" / L"log";
     std::filesystem::create_directories(logDirectory, logError);
     SYSTEMTIME now{};
     GetLocalTime(&now);
@@ -256,13 +311,180 @@ void Play() {
     swprintf(stamp, 32, L"%04u%02u%02u-%02u%02u%02u", now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond);
     const std::wstring logFile = (logDirectory / (std::wstring(L"session-") + stamp + L".log")).wstring();
     std::wstring error;
-    if (launcher::StartDetached(executable, g_settings.installDirectory, environment, logFile, error)) {
-        AppendLog(L"Started " + executable + L" (present " + g_settings.presentMode + L", frame limit " +
-                  (g_settings.fpsCap == 0 ? std::wstring(L"off") : std::to_wstring(g_settings.fpsCap) + L" fps") + L", BGM " + std::to_wstring(g_settings.bgmVolume) + L" %, voices " +
-                  std::to_wstring(g_settings.mainVolume) + L" %" + (g_settings.diagnostics ? L", diagnostics on" : L"") + L"); log " + logFile);
-    } else {
-        AppendLog(L"Could not start the title: " + error);
+    if (launcher::StartDetached(executable, settings.installDirectory, environment, logFile, error, process)) {
+        log(L"Started " + executable + L" (present " + settings.presentMode + L", frame limit " +
+                  (settings.fpsCap == 0 ? std::wstring(L"off") : std::to_wstring(settings.fpsCap) + L" fps") + L", BGM " + std::to_wstring(settings.bgmVolume) + L" %, voices " +
+                  std::to_wstring(settings.mainVolume) + L" %" + (settings.diagnostics ? L", diagnostics on" : L"") + L"); log " + logFile);
+        return true;
     }
+    log(L"Could not start the title: " + error);
+    return false;
+}
+
+void StartPresence(launcher::DiscordPresence& presence, const Settings& settings, HANDLE process, const launcher::LineSink& log) {
+    if (!settings.discordEnabled) return;
+    wchar_t fromEnvironment[64];
+    const DWORD length = GetEnvironmentVariableW(L"ANYPS4_DISCORD_CLIENT_ID", fromEnvironment, 64);
+    const std::wstring clientId = length > 0 && length < 64 ? std::wstring(fromEnvironment) : settings.discordClientId;
+    if (!launcher::ValidDiscordClientId(clientId)) {
+        log(L"Discord Rich Presence is on but there is no valid application id: create one at discord.com/developers and paste it in Settings.");
+        return;
+    }
+    presence.Start(clientId, process, log);
+}
+
+void Play() {
+    ReadControlsIntoSettings();
+    launcher::SaveSettings(g_settings);
+    launcher::SavePadConfiguration(g_settings);
+    HANDLE process = nullptr;
+    if (!LaunchTitle(g_settings, &process, AppendLog)) return;
+    ForgetGame();
+    g_gameProcess = process;
+    g_gamePid = GetProcessId(process);
+    StartPresence(g_presence, g_settings, process, PostLog);
+    RefreshGameRunning();
+}
+
+int PlayDirect() {
+    Settings settings = launcher::LoadSettings();
+    launcher::SavePadConfiguration(settings);
+    HANDLE process = nullptr;
+    std::wstring last;
+    if (!LaunchTitle(settings, &process, [&last](const std::wstring& line) { last = line; })) {
+        MessageBoxW(nullptr, last.c_str(), L"AnyPS4", MB_ICONERROR);
+        return 1;
+    }
+    launcher::DiscordPresence presence;
+    StartPresence(presence, settings, process, [](const std::wstring&) {});
+    WaitForSingleObject(process, INFINITE);
+    presence.Stop();
+    CloseHandle(process);
+    return 0;
+}
+
+void Say(const std::wstring& text) {
+    AttachConsole(ATTACH_PARENT_PROCESS);
+    HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (out == nullptr || out == INVALID_HANDLE_VALUE) return;
+    const std::wstring line = text + L"\r\n";
+    const int bytes = WideCharToMultiByte(CP_UTF8, 0, line.c_str(), static_cast<int>(line.size()), nullptr, 0, nullptr, nullptr);
+    std::string utf8(static_cast<std::size_t>(bytes), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, line.c_str(), static_cast<int>(line.size()), utf8.data(), bytes, nullptr, nullptr);
+    DWORD written = 0;
+    WriteFile(out, utf8.data(), static_cast<DWORD>(utf8.size()), &written, nullptr);
+}
+
+int ExportSavesDirect(const std::wstring& zipFile) {
+    const Settings settings = launcher::LoadSettings();
+    int count = 0;
+    std::wstring error;
+    if (!launcher::ExportSaves(settings.installDirectory, zipFile, count, error)) {
+        Say(L"Export failed: " + error);
+        return 1;
+    }
+    Say(std::to_wstring(count) + L" files saved to " + zipFile);
+    return 0;
+}
+
+int ImportSavesDirect(const std::wstring& zipFile) {
+    Settings settings = launcher::LoadSettings();
+    if (launcher::FindRunningTitle(FindExecutable(settings)) != 0) {
+        Say(L"Close the game before importing saves.");
+        return 1;
+    }
+    int count = 0;
+    std::wstring error;
+    std::wstring previous;
+    if (!launcher::ImportSaves(settings.installDirectory, zipFile, count, previous, error)) {
+        Say(L"Import failed: " + error);
+        return 1;
+    }
+    Say(std::to_wstring(count) + L" files restored; the previous saves are in " + previous);
+    return 0;
+}
+
+std::wstring PickZip(bool save) {
+    IFileDialog* dialog = nullptr;
+    if (FAILED(CoCreateInstance(save ? CLSID_FileSaveDialog : CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog)))) return {};
+    const COMDLG_FILTERSPEC filters[] = {{L"ZIP archive (*.zip)", L"*.zip"}, {L"All files", L"*.*"}};
+    DWORD options = 0;
+    dialog->GetOptions(&options);
+    dialog->SetOptions(options | FOS_FORCEFILESYSTEM | (save ? FOS_OVERWRITEPROMPT : FOS_FILEMUSTEXIST));
+    dialog->SetFileTypes(2, filters);
+    dialog->SetDefaultExtension(L"zip");
+    dialog->SetTitle(save ? L"Export saves to" : L"Import saves from");
+    if (save) dialog->SetFileName(launcher::DefaultBackupName().c_str());
+    std::wstring result;
+    if (SUCCEEDED(dialog->Show(g_window))) {
+        IShellItem* item = nullptr;
+        if (SUCCEEDED(dialog->GetResult(&item))) {
+            wchar_t* path = nullptr;
+            if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path))) {
+                result = path;
+                CoTaskMemFree(path);
+            }
+            item->Release();
+        }
+    }
+    dialog->Release();
+    return result;
+}
+
+void ExportSavesClicked() {
+    ReadControlsIntoSettings();
+    if (g_settings.installDirectory.empty()) {
+        MessageBoxW(g_window, L"Choose the install folder first.", L"Export Saves", MB_ICONINFORMATION);
+        return;
+    }
+    const std::wstring file = PickZip(true);
+    if (file.empty()) return;
+    int count = 0;
+    std::wstring error;
+    if (launcher::ExportSaves(g_settings.installDirectory, file, count, error)) {
+        const std::wstring text = std::to_wstring(count) + L" files saved to " + file;
+        AppendLog(text);
+        MessageBoxW(g_window, text.c_str(), L"Export Saves", MB_ICONINFORMATION);
+    } else {
+        AppendLog(L"Export failed: " + error);
+        MessageBoxW(g_window, error.c_str(), L"Export Saves", MB_ICONERROR);
+    }
+}
+
+void ImportSavesClicked() {
+    ReadControlsIntoSettings();
+    if (g_settings.installDirectory.empty()) {
+        MessageBoxW(g_window, L"Choose the install folder first.", L"Import Saves", MB_ICONINFORMATION);
+        return;
+    }
+    RefreshGameRunning();
+    if (g_gamePid != 0) {
+        MessageBoxW(g_window, L"Close the game before importing saves.", L"Import Saves", MB_ICONINFORMATION);
+        return;
+    }
+    const std::wstring file = PickZip(false);
+    if (file.empty()) return;
+    const std::wstring question = L"Replace the saves in " + g_settings.installDirectory + L"\\savedata with the contents of " + file +
+                                  L"?\n\nThe current saves are kept in a savedata_backup_<date> folder next to them.";
+    if (MessageBoxW(g_window, question.c_str(), L"Import Saves", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES) return;
+    int count = 0;
+    std::wstring error;
+    std::wstring previous;
+    if (launcher::ImportSaves(g_settings.installDirectory, file, count, previous, error)) {
+        const std::wstring text = std::to_wstring(count) + L" files restored." + (previous.empty() ? std::wstring() : L" The previous saves are in " + previous);
+        AppendLog(text);
+        MessageBoxW(g_window, text.c_str(), L"Import Saves", MB_ICONINFORMATION);
+    } else {
+        AppendLog(L"Import failed: " + error);
+        MessageBoxW(g_window, error.c_str(), L"Import Saves", MB_ICONERROR);
+    }
+}
+
+void AddToSteam() {
+    ReadControlsIntoSettings();
+    const launcher::SteamResult result = launcher::AddToSteam(LauncherPath(), g_settings.installDirectory, g_settings.gameDirectory, AppendLog);
+    AppendLog(result.message);
+    RefreshStatus();
 }
 
 void Install() {
@@ -319,10 +541,6 @@ void Install() {
     }).detach();
 }
 
-// ---------------------------------------------------------------------------------------------------------------------
-// Layout. Coordinates are 96-dpi pixels; every helper scales them.
-// ---------------------------------------------------------------------------------------------------------------------
-
 void AddCard(int page, int x, int y, int width, int height, const wchar_t* title) {
     g_cards.push_back({page, ui::Rect(x, y, width, height), title});
 }
@@ -371,11 +589,9 @@ void AddCheckbox(int page, const wchar_t* text, int x, int y, int width, int id,
 }
 
 void CreateControls() {
-    // Header tabs.
     AddButton(-1, L"Home", 632, 32, 108, 36, kIdTabHome);
     AddButton(-1, L"⚙  Settings", 748, 32, 128, 36, kIdTabSettings);
 
-    // ---- Home --------------------------------------------------------------------------------------------------
     AddCard(kPageHome, 24, 112, 852, 216, L"GAME");
     AddLabel(kPageHome, 44, 150, 500, 18, L"Game folder (the one that contains eboot.bin)");
     AddField(kPageHome, g_settings.gameDirectory, 44, 172, 652, 38, kIdGame);
@@ -384,9 +600,10 @@ void CreateControls() {
         return g_installed ? std::wstring(L"Ready to play. Install again only if you move the game folder or change its files.")
                            : std::wstring(L"Pick your game folder, then press Install (it takes a few seconds). Your game files are never copied.");
     });
-    AddButton(kPageHome, L"PLAY", 44, 246, 408, 64, kIdPlay);
-    AddButton(kPageHome, L"Install (relink + libraries)", 464, 246, 220, 64, kIdInstall);
-    AddButton(kPageHome, L"Open install folder", 696, 246, 160, 64, kIdOpenFolder);
+    AddButton(kPageHome, L"PLAY", 44, 246, 276, 64, kIdPlay);
+    AddButton(kPageHome, L"Install", 332, 246, 150, 64, kIdInstall);
+    AddButton(kPageHome, L"Open install folder", 494, 246, 176, 64, kIdOpenFolder);
+    AddButton(kPageHome, L"Add to Steam", 682, 246, 174, 64, kIdSteam);
 
     AddCard(kPageHome, 24, 344, 852, 296, L"ACTIVITY");
     {
@@ -397,32 +614,36 @@ void CreateControls() {
         ui::StyleScrollBars(g_log);
     }
 
-    // ---- Settings: paths, graphics, audio (left column) --------------------------------------------------------
-    AddCard(kPageSettings, 24, 112, 408, 140, L"PATHS");
+    AddCard(kPageSettings, 24, 112, 408, 140, L"PATHS AND SAVES");
     AddLabel(kPageSettings, 44, 146, 368, 18, L"Install folder (outside the game folder)");
     AddField(kPageSettings, g_settings.installDirectory, 44, 168, 250, 36, kIdInstallDir);
     AddButton(kPageSettings, L"Browse...", 302, 168, 110, 36, kIdInstallBrowse);
-    AddButton(kPageSettings, L"Open install folder", 44, 212, 180, 30, 0 + kIdOpenFolder + 1000);
+    AddButton(kPageSettings, L"Open folder", 44, 212, 110, 30, kIdOpenFolder + 1000);
+    AddButton(kPageSettings, L"Export Saves", 162, 212, 120, 30, kIdExportSaves);
+    AddButton(kPageSettings, L"Import Saves", 290, 212, 122, 30, kIdImportSaves);
 
-    AddCard(kPageSettings, 24, 264, 408, 186, L"GRAPHICS");
-    AddLabel(kPageSettings, 44, 306, 100, 30, L"Present mode", ui::kFontSmall, ui::kText);
-    for (int k = 0; k < 3; ++k) AddButton(kPageSettings, kPresentCaptions[k], 150 + k * 80, 306, 74, 30, kIdPresentBase + k);
-    AddLabel(kPageSettings, 44, 346, 100, 30, L"Frame limit", ui::kFontSmall, ui::kText);
-    for (int k = 0; k < 3; ++k) AddButton(kPageSettings, kFpsCaptions[k], 150 + k * 80, 346, 74, 30, kIdFpsBase + k);
-    AddCheckbox(kPageSettings, L"Persistent pipeline cache", 44, 388, 184, kIdPipelineCache, g_settings.pipelineCache);
-    AddCheckbox(kPageSettings, L"Vulkan validation layer", 232, 388, 192, kIdValidation, g_settings.validation);
-    AddCheckbox(kPageSettings, L"Headless (no rendering)", 44, 418, 184, kIdHeadless, g_settings.headless);
-    AddCheckbox(kPageSettings, L"Diagnostics", 232, 418, 192, kIdDiagnostics, g_settings.diagnostics);
+    AddCard(kPageSettings, 24, 264, 408, 200, L"GRAPHICS");
+    AddLabel(kPageSettings, 44, 300, 100, 28, L"Present mode", ui::kFontSmall, ui::kText);
+    for (int k = 0; k < 3; ++k) AddButton(kPageSettings, kPresentCaptions[k], 150 + k * 80, 300, 74, 28, kIdPresentBase + k);
+    AddLabel(kPageSettings, 44, 334, 100, 28, L"Frame limit", ui::kFontSmall, ui::kText);
+    for (int k = 0; k < 3; ++k) AddButton(kPageSettings, kFpsCaptions[k], 150 + k * 80, 334, 74, 28, kIdFpsBase + k);
+    AddLabel(kPageSettings, 44, 368, 100, 28, L"Game language", ui::kFontSmall, ui::kText);
+    for (int k = 0; k < 2; ++k) AddButton(kPageSettings, kLanguageCaptions[k], 150 + k * 114, 368, 108, 28, kIdLanguageBase + k);
+    AddCheckbox(kPageSettings, L"Persistent pipeline cache", 44, 406, 184, kIdPipelineCache, g_settings.pipelineCache);
+    AddCheckbox(kPageSettings, L"Vulkan validation layer", 232, 406, 192, kIdValidation, g_settings.validation);
+    AddCheckbox(kPageSettings, L"Headless (no rendering)", 44, 434, 184, kIdHeadless, g_settings.headless);
+    AddCheckbox(kPageSettings, L"Diagnostics", 232, 434, 192, kIdDiagnostics, g_settings.diagnostics);
 
-    AddCard(kPageSettings, 24, 462, 408, 176, L"AUDIO");
-    AddSlider(kPageSettings, kIdBgm, 500, [] { return L"Music (BGM): " + std::to_wstring(SendMessageW(Control(kIdBgm), TBM_GETPOS, 0, 0)) + L" %"; }, g_settings.bgmVolume);
-    AddSlider(kPageSettings, kIdMain, 542, [] { return L"Voices and effects: " + std::to_wstring(SendMessageW(Control(kIdMain), TBM_GETPOS, 0, 0)) + L" %"; },
+    AddCard(kPageSettings, 24, 476, 408, 162, L"AUDIO");
+    AddLabel(kPageSettings, 150, 488, 262, 20, [] { return g_gameRunning ? std::wstring(L"Live: the running game follows these sliders") : std::wstring(L"Applied live while the game runs"); },
+             ui::kFontSmall, ui::kMuted, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+    AddSlider(kPageSettings, kIdBgm, 508, [] { return L"Music (BGM): " + std::to_wstring(SendMessageW(Control(kIdBgm), TBM_GETPOS, 0, 0)) + L" %"; }, g_settings.bgmVolume);
+    AddSlider(kPageSettings, kIdMain, 548, [] { return L"Voices and effects: " + std::to_wstring(SendMessageW(Control(kIdMain), TBM_GETPOS, 0, 0)) + L" %"; },
               g_settings.mainVolume);
-    AddSlider(kPageSettings, kIdFloor, 584,
+    AddSlider(kPageSettings, kIdFloor, 588,
               [] { return L"Music floor when the title mutes it (advanced): " + std::to_wstring(SendMessageW(Control(kIdFloor), TBM_GETPOS, 0, 0)) + L" %"; },
               g_settings.musicFloor);
 
-    // ---- Settings: controls (right column) ---------------------------------------------------------------------
     AddCard(kPageSettings, 448, 112, 428, 526, L"CONTROLS");
     AddLabel(kPageSettings, 468, 146, 388, 18, L"Click a key to change it. Escape cancels.");
     std::size_t count = 0;
@@ -431,11 +652,14 @@ void CreateControls() {
         const int column = static_cast<int>(k / 12);
         const int row = static_cast<int>(k % 12);
         const int x = 468 + column * 196;
-        const int y = 176 + row * 32;
-        AddLabel(kPageSettings, x, y, 104, 28, Widen(bindings[k].label).c_str(), ui::kFontSmall, ui::kText);
-        AddButton(kPageSettings, Widen(anyps4::PadKeyName_(g_settings.keys[k]).c_str()).c_str(), x + 106, y, 82, 28, kIdKeyBase + static_cast<int>(k));
+        const int y = 176 + row * 28;
+        AddLabel(kPageSettings, x, y, 104, 24, Widen(bindings[k].label).c_str(), ui::kFontSmall, ui::kText);
+        AddButton(kPageSettings, Widen(anyps4::PadKeyName_(g_settings.keys[k]).c_str()).c_str(), x + 106, y, 82, 24, kIdKeyBase + static_cast<int>(k));
     }
-    AddCheckbox(kPageSettings, L"Use an XInput gamepad (slot 1) when connected", 468, 580, 380, kIdXInput, g_settings.xinput);
+    AddCheckbox(kPageSettings, L"Use an XInput gamepad (slot 1) when connected", 468, 520, 380, kIdXInput, g_settings.xinput);
+    AddCheckbox(kPageSettings, L"Discord Rich Presence while the game runs", 468, 552, 380, kIdDiscord, g_settings.discordEnabled);
+    AddLabel(kPageSettings, 468, 582, 388, 16, L"Discord application id (create one at discord.com/developers)");
+    AddField(kPageSettings, g_settings.discordClientId, 468, 600, 388, 28, kIdDiscordId);
 
     AppendLog(L"AnyPS4 launcher. Settings: " + launcher::SettingsPath());
     std::wstring bundle;
@@ -456,10 +680,6 @@ void ShowPage(int page) {
     InvalidateRect(Control(kIdTabHome), nullptr, FALSE);
     InvalidateRect(Control(kIdTabSettings), nullptr, FALSE);
 }
-
-// ---------------------------------------------------------------------------------------------------------------------
-// Painting
-// ---------------------------------------------------------------------------------------------------------------------
 
 void PaintWindow(HDC dc, const RECT& client) {
     const int width = client.right - client.left;
@@ -490,7 +710,6 @@ void PaintWindow(HDC dc, const RECT& client) {
         ui::DrawTextLine(dc, label.text(), label.rect, label.font, label.color, label.flags);
     }
     if (g_page == kPageHome) {
-        // Status indicator, right-aligned in the title row of the game card.
         const std::wstring text = g_installed ? L"Ready" : L"Not installed";
         const COLORREF color = g_installed ? ui::kGreen : ui::kAmber;
         RECT measure = {0, 0, 0, 0};
@@ -503,6 +722,20 @@ void PaintWindow(HDC dc, const RECT& client) {
         const int top = S(124);
         const int rowHeight = S(24);
         const int left = right - textWidth - S(8) - dot;
+        if (g_onSteam) {
+            const std::wstring badge = L"On Steam";
+            RECT badgeMeasure = {0, 0, 0, 0};
+            HGDIOBJ badgePrevious = SelectObject(dc, ui::FontHandle(ui::kFontSmall));
+            DrawTextW(dc, badge.c_str(), static_cast<int>(badge.size()), &badgeMeasure, DT_CALCRECT | DT_SINGLELINE);
+            SelectObject(dc, badgePrevious);
+            const int check = S(12);
+            const int badgeWidth = S(10) + check + S(6) + (badgeMeasure.right - badgeMeasure.left) + S(12);
+            const int badgeRight = left - S(18);
+            const RECT pill = {badgeRight - badgeWidth, top + S(1), badgeRight, top + rowHeight - S(1)};
+            ui::FillRound(dc, pill, S(11), RGB(38, 34, 74), ui::kViolet);
+            ui::DrawCheck(dc, RECT{pill.left + S(10), pill.top + (pill.bottom - pill.top - check) / 2, pill.left + S(10) + check, pill.top + (pill.bottom - pill.top - check) / 2 + check}, ui::kVioletLight);
+            ui::DrawTextLine(dc, badge, RECT{pill.left + S(10) + check + S(6), pill.top, pill.right, pill.bottom}, ui::kFontSmall, ui::kVioletLight, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        }
         ui::FillEllipse(dc, RECT{left, top + (rowHeight - dot) / 2, left + dot, top + (rowHeight - dot) / 2 + dot}, color);
         ui::DrawTextLine(dc, text, RECT{left + dot + S(8), top, right + S(2), top + rowHeight}, ui::kFontButton, color, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     }
@@ -513,7 +746,7 @@ enum class Kind { Primary, Secondary, Tab, Segment, Check, Key };
 Kind KindOf(int id) {
     if (id == kIdPlay) return Kind::Primary;
     if (id == kIdTabHome || id == kIdTabSettings) return Kind::Tab;
-    if ((id >= kIdPresentBase && id < kIdPresentBase + 3) || (id >= kIdFpsBase && id < kIdFpsBase + 3)) return Kind::Segment;
+    if ((id >= kIdPresentBase && id < kIdPresentBase + 3) || (id >= kIdFpsBase && id < kIdFpsBase + 3) || (id >= kIdLanguageBase && id < kIdLanguageBase + 2)) return Kind::Segment;
     if (IsCheckbox(id)) return Kind::Check;
     if (id >= kIdKeyBase && id < kIdKeyBase + 24) return Kind::Key;
     return Kind::Secondary;
@@ -521,6 +754,7 @@ Kind KindOf(int id) {
 
 bool IsSegmentSelected(int id) {
     if (id >= kIdPresentBase && id < kIdPresentBase + 3) return g_settings.presentMode == kPresentModes[id - kIdPresentBase];
+    if (id >= kIdLanguageBase && id < kIdLanguageBase + 2) return g_settings.language == kLanguageValues[id - kIdLanguageBase];
     return g_settings.fpsCap == kFpsValues[id - kIdFpsBase];
 }
 
@@ -730,7 +964,9 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
         break;
     case WM_TIMER:
         if (wParam == kTimerHover) {
+            static int ticks = 0;
             UpdateHover();
+            if (++ticks % 20 == 0) RefreshGameRunning();
             return 0;
         }
         break;
@@ -744,9 +980,10 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
             SetFocus(window);
             return 0;
         }
-        if (id == kIdGame || id == kIdInstallDir) {
-            if (code == EN_CHANGE) RefreshStatus();
+        if (id == kIdGame || id == kIdInstallDir || id == kIdDiscordId) {
+            if (code == EN_CHANGE && id != kIdDiscordId) RefreshStatus();
             if (code == EN_SETFOCUS || code == EN_KILLFOCUS) InvalidateRect(window, nullptr, FALSE);
+            if (code == EN_KILLFOCUS && id == kIdDiscordId) PersistSettings();
             return 0;
         }
         if (code != BN_CLICKED) break;
@@ -759,6 +996,12 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
         if (id >= kIdPresentBase && id < kIdPresentBase + 3) {
             g_settings.presentMode = kPresentModes[id - kIdPresentBase];
             for (int k = 0; k < 3; ++k) InvalidateRect(Control(kIdPresentBase + k), nullptr, FALSE);
+            PersistSettings();
+            return 0;
+        }
+        if (id >= kIdLanguageBase && id < kIdLanguageBase + 2) {
+            g_settings.language = kLanguageValues[id - kIdLanguageBase];
+            for (int k = 0; k < 2; ++k) InvalidateRect(Control(kIdLanguageBase + k), nullptr, FALSE);
             PersistSettings();
             return 0;
         }
@@ -794,6 +1037,15 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
         case kIdPlay:
             Play();
             return 0;
+        case kIdSteam:
+            AddToSteam();
+            return 0;
+        case kIdExportSaves:
+            ExportSavesClicked();
+            return 0;
+        case kIdImportSaves:
+            ImportSavesClicked();
+            return 0;
         case kIdOpenFolder:
         case kIdOpenFolder + 1000:
             ReadControlsIntoSettings();
@@ -807,8 +1059,13 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
     case WM_HSCROLL:
         for (const int id : {kIdBgm, kIdMain, kIdFloor}) InvalidateRect(Control(id), nullptr, FALSE);
         {
-            RECT audio = ui::Rect(24, 462, 408, 176);
+            RECT audio = ui::Rect(24, 476, 408, 162);
             InvalidateRect(window, &audio, FALSE);
+        }
+        if (g_gamePid != 0) {
+            launcher::PushLiveAudio(g_gamePid, static_cast<float>(SendMessageW(Control(kIdBgm), TBM_GETPOS, 0, 0)) / 100.0f,
+                                    static_cast<float>(SendMessageW(Control(kIdMain), TBM_GETPOS, 0, 0)) / 100.0f,
+                                    static_cast<float>(SendMessageW(Control(kIdFloor), TBM_GETPOS, 0, 0)) / 100.0f);
         }
         if (LOWORD(wParam) == TB_ENDTRACK || LOWORD(wParam) == TB_THUMBPOSITION) {
             ReadControlsIntoSettings();
@@ -848,6 +1105,8 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
     case WM_CLOSE:
         ReadControlsIntoSettings();
         launcher::SaveSettings(g_settings);
+        g_presence.Stop();
+        ForgetGame();
         DestroyWindow(window);
         return 0;
     case WM_DESTROY:
@@ -863,6 +1122,20 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
 }  // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
+    int argumentCount = 0;
+    LPWSTR* arguments = CommandLineToArgvW(GetCommandLineW(), &argumentCount);
+    bool direct = false;
+    std::wstring exportFile;
+    std::wstring importFile;
+    for (int k = 1; arguments && k < argumentCount; ++k) {
+        if (wcscmp(arguments[k], L"--play") == 0) direct = true;
+        else if (wcscmp(arguments[k], L"--export-saves") == 0 && k + 1 < argumentCount) exportFile = arguments[++k];
+        else if (wcscmp(arguments[k], L"--import-saves") == 0 && k + 1 < argumentCount) importFile = arguments[++k];
+    }
+    if (arguments) LocalFree(arguments);
+    if (!exportFile.empty()) return ExportSavesDirect(exportFile);
+    if (!importFile.empty()) return ImportSavesDirect(importFile);
+    if (direct) return PlayDirect();
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     INITCOMMONCONTROLSEX controls{sizeof(INITCOMMONCONTROLSEX), ICC_BAR_CLASSES | ICC_STANDARD_CLASSES};
     InitCommonControlsEx(&controls);

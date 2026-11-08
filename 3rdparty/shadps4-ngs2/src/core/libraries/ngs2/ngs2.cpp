@@ -29,6 +29,7 @@
 #include "core/libraries/ngs2/ngs2_impl.h"
 #include "core/libraries/ngs2/ngs2_pan.h"
 #include "core/libraries/ngs2/ngs2_report.h"
+#include "AnyPS4LiveAudio.hpp"
 
 namespace Libraries::Ngs2 {
 
@@ -1764,10 +1765,7 @@ s32 PS4_SYSV_ABI sceNgs2SystemRender(OrbisNgs2Handle systemHandle,
                     // voice as busy; with the flags fixed the game fades tracks for real, and
                     // the floor played a faded-out track at 0.6 over the next one (the level
                     // music under the town music). ORBIS_NGS2_MUSIC_FLOOR=0.6 restores it.
-                    static const float music_floor = [] {
-                        const char* value = std::getenv("ORBIS_NGS2_MUSIC_FLOOR");
-                        return value != nullptr ? static_cast<float>(std::atof(value)) : 0.0f;
-                    }();
+                    const float music_floor = anyps4::LiveMusicFloor();
                     if (music_floor > 0.0f && music_hold && gain < 0.25f) {
                         gain = music_floor;
                     }

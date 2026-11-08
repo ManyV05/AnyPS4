@@ -28,6 +28,43 @@ The executable can be started directly, but then its output goes nowhere. To kee
 
 Saves go to `savedata/` beside the executable (`ORBIS_SAVEDATA_DIR` overrides it). Keyboard and controller input is described in [INPUT_MAPPING.md](INPUT_MAPPING.md). The console language is fixed to English (United States).
 
+## Add to Steam
+
+**Add to Steam** on the launcher's Home page adds a non-Steam shortcut for the title to your Steam library:
+
+1. Close Steam completely (Steam menu > Exit). Steam rewrites its shortcuts when it closes, so the button refuses to edit them while Steam runs.
+2. Press **Add to Steam**. The launcher finds Steam through `HKCU\Software\Valve\Steam\SteamPath`, picks the signed-in account (`ActiveUser`, or the most recently used account folder) and adds an entry to `userdata/<account>/config/shortcuts.vdf` that runs `anyps4_launcher.exe --play`. The original file is kept once as `shortcuts.vdf.anyps4.bak`, and the other shortcuts are left as they are.
+3. Start Steam. The entry appears in the library; pressing it starts the game without opening the launcher window, and Steam counts the play time because the launcher waits for the game to exit. The app id is the one Steam derives for non-Steam shortcuts (CRC-32 of the quoted executable path plus the name, with the top bit set).
+
+`--play` starts the installed title with the settings saved in `launcher.ini` and shows an error box if it is not installed. A badge on the Home page shows when the shortcut exists; pressing the button again refreshes it.
+
+The artwork goes to `userdata/<account>/config/grid/` as `<app id>p.png` (vertical capsule, 600x900), `<app id>.png` (horizontal header, 920x430), `<app id>_hero.png` (hero banner, 1920x620) and `<app id>_logo.png` (transparent logo). The launcher builds all four from `sce_sys/pic1.png` of your own game folder; no images are shipped or downloaded. To use other pictures, put files named `vertical`, `horizontal`, `hero` or `logo` (PNG, JPEG, BMP, GIF or TIFF; `grid_vertical`, `grid_horizontal`, `capsule`, `poster`, `header` and `banner` also work) in a `steam_art` folder inside the install folder or next to the launcher. A file found there replaces the generated one for that role. WebP and AVIF files are not supported.
+
+The `ANYPS4_STEAM_DIR` environment variable points the launcher at another Steam folder, which is useful for trying the button without touching the real library.
+
+## Saves and backups
+
+**Export Saves** and **Import Saves** (Settings, under Paths and saves) back up and restore `savedata/` of the install folder:
+
+- Export asks for a file name (the default is `AnyPS4_SaveBackup_YYYYMMDD.zip`) and writes a compressed ZIP with every file under `savedata/`.
+- Import asks for a ZIP, asks for confirmation and replaces `savedata/` with its contents. The current saves are not deleted: they are moved to `savedata_backup_<date>-<time>` next to them. ZIPs made by this launcher, by Windows Explorer or by other tools work, with or without the `savedata/` folder inside; a ZIP with paths that leave the folder (`..`) is refused and nothing is changed. Import is refused while the game runs.
+
+Both can also run without a window, which suits scripts: `anyps4_launcher.exe --export-saves <file.zip>` and `anyps4_launcher.exe --import-saves <file.zip>` use the install folder from `launcher.ini` and exit with code 0 on success and 1 on failure (the message goes to the console that started them).
+
+## Volume while the game runs
+
+The music, voices and effects sliders and the music floor in Settings act on a running game at once: the launcher writes the new values into a shared memory block named `Local\AnyPS4.LiveAudio.<game process id>` that `libSceAudioOut.prx` and `libSceNgs2.prx` read on every audio block, so nothing has to be restarted. The launcher finds the game it started, or any running copy of the installed executable. The block starts with the values from the environment variables (`ORBIS_AUDIO_BGM_GAIN`, `ORBIS_AUDIO_MAIN_GAIN`, `ORBIS_NGS2_MUSIC_FLOOR`), so a title started without the launcher behaves as before. Needs libraries built from this version: run Install again (or use the standalone package of this version).
+
+## Discord Rich Presence
+
+While the game runs, the launcher can show "Playing The Witch and the Hundred Knight: Revival Edition" with the line "AnyPS4 Runtime" and a timer of the session on your Discord profile. It talks to the Discord desktop app through its local IPC pipe, so Discord has to be running, and the presence is cleared when the game closes (it also disappears if you close the launcher while playing, except when the game was started by the Steam entry, where the launcher stays open until the game ends).
+
+Discord needs an application id for this: create an application named after the game at discord.com/developers (its name is what Discord shows after "Playing"), copy its Application ID into the **Discord application id** field in Settings, and keep **Discord Rich Presence** ticked. The id is stored in `launcher.ini` (`discord`, `discord_client_id`). Without a valid id nothing is sent and the Home page log says so. `ANYPS4_DISCORD_CLIENT_ID` overrides the id and `ANYPS4_DISCORD_PIPE` names another pipe, for tests.
+
+## Game language
+
+**Game language** in Settings chooses the console language the title is told: English (US), the default, or Japanese. The launcher saves it in `launcher.ini` (`language=1` for English (US), `language=0` for Japanese) and starts the game with `ORBIS_SYSTEM_PARAM_LANGUAGE` set to that number; the runtime answers the title's `sceSystemServiceParamGetInt` language query with it, and with 1 (English US) when the variable is not set or not a console language number from 0 to 29. The menus and text follow the setting. The artwork of the title screen, including its Japanese logo, is the same in every language. The libraries have to come from this version: run Install again (or use the standalone package of this version).
+
 ## Runtime layout
 
 ```text

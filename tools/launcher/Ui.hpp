@@ -4,7 +4,6 @@
 
 #include <string>
 
-// Drawing helpers for the launcher's dark theme: anti-aliased rounded shapes (GDI+), text (GDI), DPI scaling and fonts.
 namespace ui {
 
 constexpr COLORREF kBackground = RGB(15, 15, 22);
@@ -30,22 +29,21 @@ enum Font { kFontTitle, kFontSubtitle, kFontBody, kFontSmall, kFontCardTitle, kF
 void Init();
 void Shutdown();
 
-int S(int value);  // scales a 96-dpi pixel count to the screen's dpi
-RECT Rect(int x, int y, int width, int height);  // scaled
+int S(int value);
+RECT Rect(int x, int y, int width, int height);
 HFONT FontHandle(Font font);
 
 void FillSolid(HDC dc, const RECT& rect, COLORREF color);
 void FillRound(HDC dc, const RECT& rect, int radius, COLORREF fill, COLORREF border, bool withBorder = true, BYTE fillAlpha = 255);
 void FillRoundGradient(HDC dc, const RECT& rect, int radius, COLORREF left, COLORREF right);
-// The header gradient (and its accent line) as it would look in a window of the given size, clipped to destination.
 void HeaderBackdrop(HDC dc, const RECT& destination, int fullWidth, int fullHeight, int originX, int originY);
 void FillEllipse(HDC dc, const RECT& box, COLORREF color);
-void FillTriangle(HDC dc, const RECT& box, COLORREF color);  // pointing right
+void FillTriangle(HDC dc, const RECT& box, COLORREF color);
 void DrawCheck(HDC dc, const RECT& box, COLORREF color);
 void DrawTrack(HDC dc, const RECT& track, int filledRight, COLORREF filled, COLORREF empty);
 void DrawTextLine(HDC dc, const std::wstring& text, RECT rect, Font font, COLORREF color, UINT flags);
 
-void StyleWindow(HWND window);       // dark title bar where the system supports it
-void StyleScrollBars(HWND control);  // dark scroll bars where the system supports it
+void StyleWindow(HWND window);
+void StyleScrollBars(HWND control);
 
 }  // namespace ui

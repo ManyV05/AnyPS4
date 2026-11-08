@@ -41,7 +41,6 @@ HFONT MakeFont(int pixels, int weight, const wchar_t* face) {
 }  // namespace
 
 void Init() {
-    // Without this the system scales the whole window as a bitmap on high-dpi screens and everything looks blurry.
     if (HMODULE user32 = GetModuleHandleW(L"user32.dll")) {
         using SetAware = BOOL(WINAPI*)();
         if (auto setAware = reinterpret_cast<SetAware>(reinterpret_cast<void*>(GetProcAddress(user32, "SetProcessDPIAware")))) setAware();
@@ -199,11 +198,11 @@ void StyleWindow(HWND window) {
     auto setAttribute = reinterpret_cast<SetAttribute>(reinterpret_cast<void*>(GetProcAddress(dwm, "DwmSetWindowAttribute")));
     if (setAttribute) {
         const BOOL on = TRUE;
-        setAttribute(window, 20, &on, sizeof on);  // DWMWA_USE_IMMERSIVE_DARK_MODE
+        setAttribute(window, 20, &on, sizeof on);
         const COLORREF caption = kBackground;
-        setAttribute(window, 35, &caption, sizeof caption);  // DWMWA_CAPTION_COLOR (Windows 11)
+        setAttribute(window, 35, &caption, sizeof caption);
         const COLORREF text = kText;
-        setAttribute(window, 36, &text, sizeof text);  // DWMWA_TEXT_COLOR (Windows 11)
+        setAttribute(window, 36, &text, sizeof text);
     }
     FreeLibrary(dwm);
 }

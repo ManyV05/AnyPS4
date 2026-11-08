@@ -53,7 +53,6 @@ void WriteInt(const std::wstring& file, const wchar_t* key, int value) {
 }  // namespace
 
 std::wstring SettingsPath() {
-    // ANYPS4_CONFIG_DIR keeps the settings somewhere else (a portable folder, or a test that must not touch the real ones).
     wchar_t overrideDirectory[MAX_PATH];
     const DWORD overrideLength = GetEnvironmentVariableW(L"ANYPS4_CONFIG_DIR", overrideDirectory, MAX_PATH);
     if (overrideLength > 0 && overrideLength < MAX_PATH) {
@@ -93,10 +92,11 @@ Settings LoadSettings() {
     settings.diagnostics = ReadInt(file, L"diagnostics", 0) != 0;
     settings.bgmVolume = ReadInt(file, L"bgm_volume", 70);
     settings.mainVolume = ReadInt(file, L"main_volume", 100);
-    // The key changed with the default: launcher.ini files written when the floor defaulted to 40 keep
-    // that value under "music_floor", and reading it would switch the overlapping-music workaround back on.
     settings.musicFloor = ReadInt(file, L"music_floor_v2", 0);
     settings.xinput = ReadInt(file, L"xinput", 1) != 0;
+    settings.language = ReadInt(file, L"language", 1);
+    settings.discordEnabled = ReadInt(file, L"discord", 1) != 0;
+    settings.discordClientId = ReadString(file, L"discord_client_id", L"");
     std::size_t count = 0;
     const anyps4::PadBinding* bindings = anyps4::PadBindings(count);
     for (std::size_t k = 0; k < count && k < settings.keys.size(); ++k) {
@@ -130,6 +130,9 @@ void SaveSettings(const Settings& settings) {
     WriteInt(file, L"main_volume", settings.mainVolume);
     WriteInt(file, L"music_floor_v2", settings.musicFloor);
     WriteInt(file, L"xinput", settings.xinput ? 1 : 0);
+    WriteInt(file, L"language", settings.language);
+    WriteInt(file, L"discord", settings.discordEnabled ? 1 : 0);
+    WriteString(file, L"discord_client_id", settings.discordClientId);
     std::size_t count = 0;
     const anyps4::PadBinding* bindings = anyps4::PadBindings(count);
     for (std::size_t k = 0; k < count && k < settings.keys.size(); ++k) {

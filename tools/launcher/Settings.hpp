@@ -27,6 +27,9 @@ struct Settings {
     int mainVolume = 100;
     int musicFloor = 0;
     bool xinput = true;
+    int language = 1;
+    bool discordEnabled = true;
+    std::wstring discordClientId;
     std::array<int, 24> keys{};
 };
 

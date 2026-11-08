@@ -79,7 +79,7 @@ bool RunCaptured(const std::wstring& commandLine, const std::wstring& workingDir
 }
 
 bool StartDetached(const std::wstring& executable, const std::wstring& workingDirectory, const std::vector<std::pair<std::wstring, std::wstring>>& environment,
-                   const std::wstring& logFile, std::wstring& error) {
+                   const std::wstring& logFile, std::wstring& error, HANDLE* processOut) {
     for (const auto& [name, value] : environment) {
         SetEnvironmentVariableW(name.c_str(), value.empty() ? nullptr : value.c_str());
     }
@@ -107,7 +107,8 @@ bool StartDetached(const std::wstring& executable, const std::wstring& workingDi
         error = L"CreateProcess failed with code " + std::to_wstring(GetLastError());
         return false;
     }
-    CloseHandle(process.hProcess);
+    if (processOut) *processOut = process.hProcess;
+    else CloseHandle(process.hProcess);
     CloseHandle(process.hThread);
     return true;
 }

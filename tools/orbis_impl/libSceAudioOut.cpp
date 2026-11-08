@@ -15,6 +15,8 @@
 #include <thread>
 #include <vector>
 
+#include "../../3rdparty/shadps4-ngs2/shims/AnyPS4LiveAudio.hpp"
+
 namespace {
 
 using u8 = std::uint8_t;
@@ -48,14 +50,6 @@ constexpr float kBackNearGain = 0.25f;
 constexpr float kBackFarGain = 0.15f;
 constexpr float kSideNearGain = 0.27f;
 constexpr float kSideFarGain = 0.12f;
-
-float EnvGain(const char* name, float fallback) {
-    const char* value = std::getenv(name);
-    return value != nullptr ? static_cast<float>(std::atof(value)) : fallback;
-}
-
-const float kBgmGain = EnvGain("ORBIS_AUDIO_BGM_GAIN", 0.7f);
-const float kMainGain = EnvGain("ORBIS_AUDIO_MAIN_GAIN", 1.0f);
 
 struct OutputParam {
     s32 handle;
@@ -554,7 +548,7 @@ void MixBlock(State& state, std::vector<float>& mix) {
     std::fill(mix.begin(), mix.end(), 0.0f);
     for (Port& port : state.ports) {
         if (!port.used || !port.mixed) continue;
-        const float typeGain = port.type == kPortTypeBgm ? kBgmGain : kMainGain;
+        const float typeGain = port.type == kPortTypeBgm ? anyps4::LiveBgmGain() : anyps4::LiveMainGain();
         const float gainLeft = typeGain * std::clamp(port.volume[0], 0, 32768) / 32768.0f;
         const float gainRight = typeGain * std::clamp(port.volume[1], 0, 32768) / 32768.0f;
         const double ratio = static_cast<double>(port.freq) / kMixFrequency;
@@ -632,7 +626,7 @@ void Report(State& state, Port& port, s32 handle) {
                   port.mixed ? "mixer" : "paced sink", static_cast<unsigned long long>(port.outputs), port.samples,
                   static_cast<unsigned long long>(port.paced), static_cast<unsigned long long>(port.resyncs),
                   static_cast<unsigned long long>(port.waits), static_cast<unsigned long long>(port.underruns), port.queue.size() / 2,
-                  port.volume[0] / 32768.0f, port.volume[1] / 32768.0f, port.type == kPortTypeBgm ? kBgmGain : kMainGain, port.peak,
+                  port.volume[0] / 32768.0f, port.volume[1] / 32768.0f, port.type == kPortTypeBgm ? anyps4::LiveBgmGain() : anyps4::LiveMainGain(), port.peak,
                   static_cast<unsigned long long>(state.mixer.blocks), static_cast<unsigned long long>(state.mixer.clipped), state.mixer.peak);
     Log(text);
     port.peak = 0.0f;

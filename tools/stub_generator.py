@@ -488,7 +488,7 @@ STUB_IMPLEMENTATIONS: dict[str, tuple[str, str, str]] = {
                                "if (details != nullptr) { const std::size_t size = *reinterpret_cast<const std::size_t*>(details); if (size != 0 && size <= 4096) { std::memset(details + 8, 0, size - 8); } } if (data != nullptr) { const std::size_t size = *reinterpret_cast<const std::size_t*>(data); if (size != 0 && size <= 4096) { std::memset(data + 8, 0, size - 8); } } return 0;"),
     "sceNpTrophyGetTrophyUnlockState": ("std::int32_t", "std::int32_t, std::int32_t, std::uint8_t* flags, std::uint32_t* count", "if (flags != nullptr) std::memset(flags, 0, 16); if (count != nullptr) *count = 0; return 0;"),
     "sceNpTrophyUnlockTrophy": ("std::int32_t", "std::int32_t, std::int32_t, std::int32_t, std::int32_t* platinumId", "if (platinumId != nullptr) *platinumId = -1; return 0;"),
-    "sceSystemServiceParamGetInt": ("std::int32_t", "std::int32_t paramId, std::int32_t* value", "if (value == nullptr) return static_cast<std::int32_t>(0x80A10003); switch (paramId) { case 1: *value = 1; break; case 2: *value = 2; break; case 3: *value = 0; break; case 4: *value = -360; break; case 5: *value = 0; break; case 6: *value = 0; break; case 7: *value = 0; break; case 1000: *value = 1; break; default: *value = 0; break; } return 0;"),
+    "sceSystemServiceParamGetInt": ("std::int32_t", "std::int32_t paramId, std::int32_t* value", "if (value == nullptr) return static_cast<std::int32_t>(0x80A10003); switch (paramId) { case 1: { const char* configured = std::getenv(\"ORBIS_SYSTEM_PARAM_LANGUAGE\"); const int language = configured != nullptr && configured[0] != '\\0' ? std::atoi(configured) : 1; *value = language >= 0 && language <= 29 ? language : 1; break; } case 2: *value = 2; break; case 3: *value = 0; break; case 4: *value = -360; break; case 5: *value = 0; break; case 6: *value = 0; break; case 7: *value = 0; break; case 1000: *value = 1; break; default: *value = 0; break; } return 0;"),
     "sceAppContentAppParamGetInt": ("std::int32_t", "std::uint32_t paramId, std::int32_t* value", "if (value == nullptr) return static_cast<std::int32_t>(0x80D90002); *value = paramId == 0 ? 3 : 0; return 0;"),
     "sceAppContentGetAddcontInfoList": ("std::int32_t", "std::uint32_t, void*, std::uint32_t, std::uint32_t* hitNum", "if (hitNum != nullptr) *hitNum = 0; return 0;"),
     "scePlayGoGetLocus": ("std::int32_t", "std::int32_t, const std::uint16_t*, std::uint32_t count, std::int8_t* loci",
@@ -582,7 +582,7 @@ def write_stub_module(out: Path, file_name: str, nids: dict[str, dict]) -> None:
     directory = out / stem
     directory.mkdir(parents=True, exist_ok=True)
     definitions = [f"LIBRARY {file_name}", "EXPORTS"]
-    lines = ["#include <common/OrbisHle.hpp>", "#include <cstddef>", "#include <cstring>", "", 'extern "C" {', ""]
+    lines = ["#include <common/OrbisHle.hpp>", "#include <cstddef>", "#include <cstdlib>", "#include <cstring>", "", 'extern "C" {', ""]
     for nid, record in nids.items():
         if record["kind"] == "object":
             lines.append(f'ORBIS_HLE_OBJECT({record["name"]})')
