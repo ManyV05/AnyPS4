@@ -76,8 +76,8 @@ constexpr int kPageSettings = 1;
 
 const wchar_t* const kPresentModes[3] = {L"Fifo", L"Mailbox", L"Immediate"};
 const wchar_t* const kPresentCaptions[3] = {L"Fifo", L"Mailbox", L"Immediate"};
-const int kFpsValues[3] = {30, 60, 0};
-const wchar_t* const kFpsCaptions[3] = {L"30 fps", L"60 fps", L"Unlimited"};
+const int kFpsValues[2] = {30, 60};
+const wchar_t* const kFpsCaptions[2] = {L"30 fps", L"60 fps"};
 const int kLanguageValues[2] = {1, 0};
 constexpr int kResolutionCount = 5;
 const wchar_t* const kResolutionValues[kResolutionCount] = {L"1280x720", L"1920x1080", L"2560x1440", L"2560x1600", L"3840x2160"};
@@ -373,7 +373,7 @@ bool LaunchTitle(Settings& settings, HANDLE* process, const std::function<void(c
     std::wstring error;
     if (launcher::StartDetached(executable, settings.installDirectory, environment, logFile, error, process)) {
         log(L"Started " + executable + (settings.uncappedFps ? std::wstring(L" (FPS unlocked") : L" (present " + settings.presentMode + L", frame limit " +
-                  (settings.fpsCap == 0 ? std::wstring(L"off") : std::to_wstring(settings.fpsCap) + L" fps")) + L", BGM " + std::to_wstring(settings.bgmVolume) + L" %, voices " +
+                  (std::to_wstring(settings.fpsCap) + L" fps")) + L", BGM " + std::to_wstring(settings.bgmVolume) + L" %, voices " +
                   std::to_wstring(settings.mainVolume) + L" %, save slot " + std::to_wstring(saveSlot) + (settings.diagnostics ? L", diagnostics on" : L"") + L"); log " + logFile);
         return true;
     }
@@ -655,6 +655,18 @@ int SaveSlotIndex() {
     return g_settings.saveSlot >= 1 && g_settings.saveSlot <= launcher::kSaveSlotCount ? g_settings.saveSlot - 1 : 0;
 }
 
+void UpdateUncappedControls() {
+    const BOOL enabled = g_checked[kIdUncapped] ? FALSE : TRUE;
+    for (int k = 0; k < 3; ++k) {
+        EnableWindow(Control(kIdPresentBase + k), enabled);
+        InvalidateRect(Control(kIdPresentBase + k), nullptr, FALSE);
+    }
+    for (int k = 0; k < 2; ++k) {
+        EnableWindow(Control(kIdFpsBase + k), enabled);
+        InvalidateRect(Control(kIdFpsBase + k), nullptr, FALSE);
+    }
+}
+
 void AddSlider(int page, int id, int labelY, std::function<std::wstring()> label, int value) {
     AddLabel(page, 396, labelY, 300, 18, std::move(label), ui::kFontSmall, ui::kText);
     HWND bar = AddChild(page, TRACKBAR_CLASSW, L"", TBS_HORZ | TBS_NOTICKS, 392, labelY + 16, 308, 22, id);
@@ -714,7 +726,7 @@ void CreateControls() {
     AddLabel(kPageSettings, 396, 146, 88, 28, L"Present mode", ui::kFontSmall, ui::kText);
     for (int k = 0; k < 3; ++k) AddButton(kPageSettings, kPresentCaptions[k], 488 + k * 70, 146, 66, 28, kIdPresentBase + k);
     AddLabel(kPageSettings, 396, 180, 88, 28, L"Frame limit", ui::kFontSmall, ui::kText);
-    for (int k = 0; k < 3; ++k) AddButton(kPageSettings, kFpsCaptions[k], 488 + k * 70, 180, 66, 28, kIdFpsBase + k);
+    for (int k = 0; k < 2; ++k) AddButton(kPageSettings, kFpsCaptions[k], 488 + k * 70, 180, 66, 28, kIdFpsBase + k);
     AddLabel(kPageSettings, 396, 216, 300, 16, L"Window Size (Output)", ui::kFontSmall, ui::kText);
     AddButton(kPageSettings, kResolutionCaptions[ResolutionIndex()], 396, 234, 300, 28, kIdResolution);
     AddLabel(kPageSettings, 396, 264, 300, 32, L"Scales display window. Internal game render stays 1080p.", ui::kFontSmall, ui::kMuted, DT_LEFT | DT_TOP | DT_WORDBREAK);
@@ -725,6 +737,7 @@ void CreateControls() {
     AddCheckbox(kPageSettings, L"Headless (no rendering)", 396, 422, 300, kIdHeadless, g_settings.headless);
     AddCheckbox(kPageSettings, L"Diagnostics (writes logs, slows the game)", 396, 452, 300, kIdDiagnostics, g_settings.diagnostics);
     EnableWindow(Control(kIdResolution), g_settings.borderless ? FALSE : TRUE);
+    UpdateUncappedControls();
 
     AddCard(kPageSettings, 24, 462, 340, 206, L"SAVE SLOT");
     AddLabel(kPageSettings, 44, 496, 300, 16, L"Slot the game loads and saves in", ui::kFontSmall, ui::kText);
@@ -843,7 +856,7 @@ Kind KindOf(int id) {
     if (id == kIdPlay) return Kind::Primary;
     if (id == kIdResolution || id == kIdSaveSlot) return Kind::Dropdown;
     if (id == kIdTabHome || id == kIdTabSettings) return Kind::Tab;
-    if ((id >= kIdPresentBase && id < kIdPresentBase + 3) || (id >= kIdFpsBase && id < kIdFpsBase + 3) || (id >= kIdLanguageBase && id < kIdLanguageBase + 2)) return Kind::Segment;
+    if ((id >= kIdPresentBase && id < kIdPresentBase + 3) || (id >= kIdFpsBase && id < kIdFpsBase + 2) || (id >= kIdLanguageBase && id < kIdLanguageBase + 2)) return Kind::Segment;
     if (IsCheckbox(id)) return Kind::Check;
     if (id >= kIdKeyBase && id < kIdKeyBase + 24) return Kind::Key;
     return Kind::Secondary;
@@ -928,7 +941,10 @@ void DrawButton(const DRAWITEMSTRUCT* item) {
         break;
     }
     case Kind::Segment: {
-        if (IsSegmentSelected(id)) {
+        if (disabled) {
+            ui::FillRound(dc, r, S(8), ui::kButton, ui::kCardBorder);
+            ui::DrawTextLine(dc, caption, r, ui::kFontSmall, IsSegmentSelected(id) ? ui::kMuted : ui::kDisabled, center);
+        } else if (IsSegmentSelected(id)) {
             ui::FillRoundGradient(dc, r, S(8), ui::kViolet, ui::kBlue);
             ui::DrawTextLine(dc, caption, r, ui::kFontSmall, RGB(255, 255, 255), center);
         } else {
@@ -1189,6 +1205,7 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
         if (IsCheckbox(id)) {
             g_checked[id] = !g_checked[id];
             if (id == kIdBorderless) EnableWindow(Control(kIdResolution), g_checked[id] ? FALSE : TRUE);
+            if (id == kIdUncapped) UpdateUncappedControls();
             InvalidateRect(Control(id), nullptr, FALSE);
             PersistSettings();
             return 0;
@@ -1205,9 +1222,9 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
             PersistSettings();
             return 0;
         }
-        if (id >= kIdFpsBase && id < kIdFpsBase + 3) {
+        if (id >= kIdFpsBase && id < kIdFpsBase + 2) {
             g_settings.fpsCap = kFpsValues[id - kIdFpsBase];
-            for (int k = 0; k < 3; ++k) InvalidateRect(Control(kIdFpsBase + k), nullptr, FALSE);
+            for (int k = 0; k < 2; ++k) InvalidateRect(Control(kIdFpsBase + k), nullptr, FALSE);
             PersistSettings();
             return 0;
         }
@@ -1341,7 +1358,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
     InitCommonControlsEx(&controls);
     ui::Init();
     g_settings = launcher::LoadSettings();
-    if (g_settings.fpsCap != 30 && g_settings.fpsCap != 0) g_settings.fpsCap = 60;
+    if (g_settings.fpsCap != 30) g_settings.fpsCap = 60;
     if (g_settings.presentMode != kPresentModes[1] && g_settings.presentMode != kPresentModes[2]) g_settings.presentMode = kPresentModes[0];
     g_cardBrush = CreateSolidBrush(ui::kCard);
     g_fieldBrush = CreateSolidBrush(ui::kField);

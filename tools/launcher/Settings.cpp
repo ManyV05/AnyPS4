@@ -101,6 +101,10 @@ Settings LoadSettings() {
     if (settings.saveSlot < 1 || settings.saveSlot > kSaveSlotCount) settings.saveSlot = 1;
     settings.askSaveSlot = ReadInt(file, L"ask_save_slot", 1) != 0;
     settings.uncappedFps = ReadInt(file, L"uncapped_fps", 0) != 0;
+    if (settings.fpsCap == 0) {
+        settings.fpsCap = 60;
+        settings.uncappedFps = true;
+    }
     settings.discordEnabled = ReadInt(file, L"discord", 1) != 0;
     settings.discordClientId = ReadString(file, L"discord_client_id", L"");
     std::size_t count = 0;
