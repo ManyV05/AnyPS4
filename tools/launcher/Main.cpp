@@ -251,7 +251,7 @@ void RefreshGameRunning() {
     }
     if (running == g_gameRunning) return;
     g_gameRunning = running;
-    RECT audio = ui::Rect(376, 438, 340, 200);
+    RECT audio = ui::Rect(376, 462, 340, 176);
     InvalidateRect(g_window, &audio, FALSE);
 }
 
@@ -600,7 +600,7 @@ int ResolutionIndex() {
 
 void AddSlider(int page, int id, int labelY, std::function<std::wstring()> label, int value) {
     AddLabel(page, 396, labelY, 300, 18, std::move(label), ui::kFontSmall, ui::kText);
-    HWND bar = AddChild(page, TRACKBAR_CLASSW, L"", TBS_HORZ | TBS_NOTICKS, 392, labelY + 18, 308, 26, id);
+    HWND bar = AddChild(page, TRACKBAR_CLASSW, L"", TBS_HORZ | TBS_NOTICKS, 392, labelY + 16, 308, 22, id);
     SendMessageW(bar, TBM_SETRANGE, TRUE, MAKELPARAM(0, 150));
     SendMessageW(bar, TBM_SETPOS, TRUE, value);
 }
@@ -651,27 +651,28 @@ void CreateControls() {
     AddLabel(kPageSettings, 44, 374, 300, 16, L"Discord application id (discord.com/developers)");
     AddField(kPageSettings, g_settings.discordClientId, 44, 394, 300, 30, kIdDiscordId);
 
-    AddCard(kPageSettings, 376, 112, 340, 314, L"GRAPHICS");
-    AddLabel(kPageSettings, 396, 150, 88, 28, L"Present mode", ui::kFontSmall, ui::kText);
-    for (int k = 0; k < 3; ++k) AddButton(kPageSettings, kPresentCaptions[k], 488 + k * 70, 150, 66, 28, kIdPresentBase + k);
-    AddLabel(kPageSettings, 396, 186, 88, 28, L"Frame limit", ui::kFontSmall, ui::kText);
-    for (int k = 0; k < 3; ++k) AddButton(kPageSettings, kFpsCaptions[k], 488 + k * 70, 186, 66, 28, kIdFpsBase + k);
-    AddLabel(kPageSettings, 396, 222, 88, 28, L"Resolution", ui::kFontSmall, ui::kText);
-    AddButton(kPageSettings, kResolutionCaptions[ResolutionIndex()], 488, 222, 206, 28, kIdResolution);
-    AddCheckbox(kPageSettings, L"Borderless Fullscreen", 396, 260, 300, kIdBorderless, g_settings.borderless);
-    AddCheckbox(kPageSettings, L"Persistent pipeline cache", 396, 296, 300, kIdPipelineCache, g_settings.pipelineCache);
-    AddCheckbox(kPageSettings, L"Vulkan validation layer", 396, 326, 300, kIdValidation, g_settings.validation);
-    AddCheckbox(kPageSettings, L"Headless (no rendering)", 396, 356, 300, kIdHeadless, g_settings.headless);
-    AddCheckbox(kPageSettings, L"Diagnostics", 396, 386, 300, kIdDiagnostics, g_settings.diagnostics);
+    AddCard(kPageSettings, 376, 112, 340, 338, L"GRAPHICS");
+    AddLabel(kPageSettings, 396, 146, 88, 28, L"Present mode", ui::kFontSmall, ui::kText);
+    for (int k = 0; k < 3; ++k) AddButton(kPageSettings, kPresentCaptions[k], 488 + k * 70, 146, 66, 28, kIdPresentBase + k);
+    AddLabel(kPageSettings, 396, 180, 88, 28, L"Frame limit", ui::kFontSmall, ui::kText);
+    for (int k = 0; k < 3; ++k) AddButton(kPageSettings, kFpsCaptions[k], 488 + k * 70, 180, 66, 28, kIdFpsBase + k);
+    AddLabel(kPageSettings, 396, 216, 300, 16, L"Window Size (Output)", ui::kFontSmall, ui::kText);
+    AddButton(kPageSettings, kResolutionCaptions[ResolutionIndex()], 396, 234, 300, 28, kIdResolution);
+    AddLabel(kPageSettings, 396, 264, 300, 32, L"Scales display window. Internal game render stays 1080p.", ui::kFontSmall, ui::kMuted, DT_LEFT | DT_TOP | DT_WORDBREAK);
+    AddCheckbox(kPageSettings, L"Borderless Fullscreen", 396, 302, 300, kIdBorderless, g_settings.borderless);
+    AddCheckbox(kPageSettings, L"Persistent pipeline cache", 396, 332, 300, kIdPipelineCache, g_settings.pipelineCache);
+    AddCheckbox(kPageSettings, L"Vulkan validation layer", 396, 362, 300, kIdValidation, g_settings.validation);
+    AddCheckbox(kPageSettings, L"Headless (no rendering)", 396, 392, 300, kIdHeadless, g_settings.headless);
+    AddCheckbox(kPageSettings, L"Diagnostics (writes logs, slows the game)", 396, 422, 300, kIdDiagnostics, g_settings.diagnostics);
     EnableWindow(Control(kIdResolution), g_settings.borderless ? FALSE : TRUE);
 
-    AddCard(kPageSettings, 376, 438, 340, 200, L"AUDIO");
-    AddLabel(kPageSettings, 456, 450, 240, 20, [] { return g_gameRunning ? std::wstring(L"Live: the running game follows these sliders") : std::wstring(L"Applied live while the game runs"); },
+    AddCard(kPageSettings, 376, 462, 340, 176, L"AUDIO");
+    AddLabel(kPageSettings, 456, 474, 240, 20, [] { return g_gameRunning ? std::wstring(L"Live: the running game follows these sliders") : std::wstring(L"Applied live while the game runs"); },
              ui::kFontSmall, ui::kMuted, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
-    AddSlider(kPageSettings, kIdBgm, 486, [] { return L"Music (BGM): " + std::to_wstring(SendMessageW(Control(kIdBgm), TBM_GETPOS, 0, 0)) + L" %"; }, g_settings.bgmVolume);
-    AddSlider(kPageSettings, kIdMain, 528, [] { return L"Voices and effects: " + std::to_wstring(SendMessageW(Control(kIdMain), TBM_GETPOS, 0, 0)) + L" %"; },
+    AddSlider(kPageSettings, kIdBgm, 500, [] { return L"Music (BGM): " + std::to_wstring(SendMessageW(Control(kIdBgm), TBM_GETPOS, 0, 0)) + L" %"; }, g_settings.bgmVolume);
+    AddSlider(kPageSettings, kIdMain, 540, [] { return L"Voices and effects: " + std::to_wstring(SendMessageW(Control(kIdMain), TBM_GETPOS, 0, 0)) + L" %"; },
               g_settings.mainVolume);
-    AddSlider(kPageSettings, kIdFloor, 570,
+    AddSlider(kPageSettings, kIdFloor, 580,
               [] { return L"Music floor when the title mutes it: " + std::to_wstring(SendMessageW(Control(kIdFloor), TBM_GETPOS, 0, 0)) + L" %"; },
               g_settings.musicFloor);
 
@@ -1145,7 +1146,7 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
     case WM_HSCROLL:
         for (const int id : {kIdBgm, kIdMain, kIdFloor}) InvalidateRect(Control(id), nullptr, FALSE);
         {
-            RECT audio = ui::Rect(376, 438, 340, 200);
+            RECT audio = ui::Rect(376, 462, 340, 176);
             InvalidateRect(window, &audio, FALSE);
         }
         if (g_gamePid != 0) {

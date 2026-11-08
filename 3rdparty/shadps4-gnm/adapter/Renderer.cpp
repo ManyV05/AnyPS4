@@ -121,6 +121,53 @@ void PaceFlip(u64 flips) {
     }
 }
 
+using FlipClock = std::chrono::steady_clock;
+
+struct FlipTiming {
+    double acquire = 0.0;
+    double submit = 0.0;
+    double present = 0.0;
+    double pace = 0.0;
+    double frame = 0.0;
+    double acquire_max = 0.0;
+    double submit_max = 0.0;
+    double present_max = 0.0;
+    double pace_max = 0.0;
+    double frame_max = 0.0;
+    u64 count = 0;
+    FlipClock::time_point last_enter{};
+};
+
+double Milliseconds(FlipClock::time_point from, FlipClock::time_point to) {
+    return std::chrono::duration<double, std::milli>(to - from).count();
+}
+
+void RecordFlipTiming(FlipTiming& timing, FlipClock::time_point enter, double acquire, double submit, double present, double pace, u64 flips) {
+    const double frame = timing.last_enter.time_since_epoch().count() != 0 ? Milliseconds(timing.last_enter, enter) : 0.0;
+    timing.last_enter = enter;
+    timing.acquire += acquire;
+    timing.submit += submit;
+    timing.present += present;
+    timing.pace += pace;
+    timing.frame += frame;
+    timing.acquire_max = std::max(timing.acquire_max, acquire);
+    timing.submit_max = std::max(timing.submit_max, submit);
+    timing.present_max = std::max(timing.present_max, present);
+    timing.pace_max = std::max(timing.pace_max, pace);
+    timing.frame_max = std::max(timing.frame_max, frame);
+    if (++timing.count < 600) {
+        return;
+    }
+    const double n = static_cast<double>(timing.count);
+    LOG_INFO(Render_Vulkan,
+             "flip timing up to #{} over {} flips, ms average/maximum: frame {:.2f}/{:.1f}, acquire {:.2f}/{:.1f}, submit {:.2f}/{:.1f}, present {:.2f}/{:.1f}, pacing sleep {:.2f}/{:.1f}",
+             flips, timing.count, timing.frame / n, timing.frame_max, timing.acquire / n, timing.acquire_max, timing.submit / n, timing.submit_max, timing.present / n,
+             timing.present_max, timing.pace / n, timing.pace_max);
+    const FlipClock::time_point last_enter = timing.last_enter;
+    timing = FlipTiming{};
+    timing.last_enter = last_enter;
+}
+
 HWND VideoOutWindow() {
     if (std::getenv("ORBIS_GNM_READBACK") != nullptr) {
         return nullptr;
@@ -272,12 +319,15 @@ bool PresentFlip(const Libraries::VideoOut::BufferAttribute& attribute, VAddr ad
         if (window_width != swapchain.GetWidth() || window_height != swapchain.GetHeight()) {
             swapchain.Recreate(window_width, window_height);
         }
+        static FlipTiming flip_timing;
+        const auto flip_enter = FlipClock::now();
         if (!swapchain.AcquireNextImage()) {
             swapchain.Recreate(window_width, window_height);
             if (!swapchain.AcquireNextImage()) {
                 return false;
             }
         }
+        const auto flip_acquired = FlipClock::now();
         VideoCore::ImageViewInfo view_info{};
         view_info.format = FrameViewFormat(attribute.pixel_format, image.info.pixel_format);
         view_info.mapping.a = vk::ComponentSwizzle::eOne;
@@ -320,14 +370,20 @@ bool PresentFlip(const Libraries::VideoOut::BufferAttribute& attribute, VAddr ad
         Vulkan::SubmitInfo info{};
         info.AddWait(swapchain.GetImageAcquiredSemaphore());
         info.AddSignal(swapchain.GetPresentReadySemaphore());
+        const auto flip_before_submit = FlipClock::now();
         r.scheduler.Flush(info);
+        const auto flip_submitted = FlipClock::now();
         {
             std::scoped_lock submit_lock{Vulkan::Scheduler::submit_mutex};
             if (!swapchain.Present()) {
                 swapchain.Recreate(window_width, window_height);
             }
         }
+        const auto flip_presented = FlipClock::now();
         PaceFlip(r.flips + 1);
+        const auto flip_paced = FlipClock::now();
+        RecordFlipTiming(flip_timing, flip_enter, Milliseconds(flip_enter, flip_acquired), Milliseconds(flip_before_submit, flip_submitted),
+                         Milliseconds(flip_submitted, flip_presented), Milliseconds(flip_presented, flip_paced), r.flips + 1);
         if (++r.flips == 1 || r.flips % 600 == 0) {
             LOG_INFO(Render_Vulkan, "flip #{} presented: {}x{} {} viewed as {} from image {:#x} into the {}x{} {} swapchain", r.flips, width,
                      height, vk::to_string(image.info.pixel_format), vk::to_string(view_info.format), address, extent.width, extent.height,

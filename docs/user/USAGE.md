@@ -69,7 +69,7 @@ Discord needs an application id for this: create an application named after the 
 
 ## Window size and fullscreen
 
-**Resolution** and **Borderless Fullscreen** in Settings (Graphics) choose how the game window opens. The resolution list has 1280x720, 1920x1080 (the default), 2560x1440, 2560x1600 (16:10) and 3840x2160, and sets the size in real screen pixels of the window's drawing area (the game window is aware of the display scaling, so a size is not enlarged by it); a size that does not fit on the screen is reduced, keeping its proportions. Borderless Fullscreen opens a window without title bar or frame that covers the whole primary monitor, at the monitor's real resolution (`GetSystemMetrics`), and the resolution list is then ignored.
+**Window Size (Output)** and **Borderless Fullscreen** in Settings (Graphics) choose how the game window opens. Window Size (Output) only scales the display window; the internal game render stays 1080p. The resolution list has 1280x720, 1920x1080 (the default), 2560x1440, 2560x1600 (16:10) and 3840x2160, and sets the size in real screen pixels of the window's drawing area (the game window is aware of the display scaling, so a size is not enlarged by it); a size that does not fit on the screen is reduced, keeping its proportions. Borderless Fullscreen opens a window without title bar or frame that covers the whole primary monitor, at the monitor's real resolution (`GetSystemMetrics`), and the the window size list is then ignored.
 
 The title renders at its own resolution (1920x1080) and the renderer presents it inside the window keeping its proportions: on a 16:10 monitor such as 2560x1600 the picture is 2560x1440 with black bars above and below, and the same happens when a window is resized to another shape. `ORBIS_WINDOW_STRETCH=1` brings back the old behaviour, which stretches the picture over the whole window.
 
@@ -124,6 +124,7 @@ Unsupported or unexpected states strictly throw `std::runtime_error`. `what()` i
 - `ORBIS_AUDIO_DUMP=<folder>` writes WAV files of every audio port and of the final mix (`ORBIS_AUDIO_DUMP_START` and `ORBIS_AUDIO_DUMP_SECONDS` choose the window).
 - A circular audio recorder keeps the last 30 s of port 2 and of the final mix. Creating or touching `dump_now.txt` in the working directory writes them to `anyps4/audio_dumps/flight-<stamp>/`, with `audio_levels.txt` and `ngs2_state.txt` (every NGS2 rack and voice). `ORBIS_AUDIO_RING=0` turns it off.
 - `ORBIS_GNM_LOG=info` (or `debug`, `trace`) raises the renderer and NGS2 log level; the default is warnings and errors.
+- The launcher's **Diagnostics** option turns on `info` logging, which writes to disk on the game thread and slows the game, more the longer the session; leave it off to play. At `info` level the renderer also logs, every 600 flips, the average and maximum milliseconds spent in frame, acquire, submit, present and the pacing sleep (`flip timing up to #N`), which tells a slow frame in the game thread from one spent presenting. The depth-overlap messages of the texture cache are `debug` level.
 - [tools/import_audit.py](../../tools/import_audit.py) lists the system functions a converted game imports and whether the built libraries provide them, before the game is launched (needs Python 3 only):
 
 ```sh
