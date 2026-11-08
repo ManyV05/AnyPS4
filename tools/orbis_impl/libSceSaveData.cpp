@@ -1,4 +1,5 @@
 #include <common/OrbisHle.hpp>
+#include "../../3rdparty/shadps4-ngs2/shims/AnyPS4LiveSave.hpp"
 #include <windows.h>
 #include <algorithm>
 #include <array>
@@ -164,6 +165,9 @@ struct State {
     fs::path root;
     std::string titleId;
     int saveSlot = 0;
+    int launchSlot = 0;
+    fs::path saveData;
+    anyps4::LiveSaveBlock* live = nullptr;
     std::array<Slot, kSlots> slots{};
     AliasFunction addAlias = nullptr;
     UnaliasFunction removeAlias = nullptr;
@@ -318,8 +322,26 @@ fs::path ResolveSaveRoot(const fs::path& saveData, const std::string& titleId, i
     return root;
 }
 
+void ApplyRequestedSaveSlot(State& state) {
+    if (state.live == nullptr) return;
+    for (const Slot& slot : state.slots) {
+        if (slot.used) return;
+    }
+    const int requested = state.live->requestedSlot.load();
+    if (requested < 1 || requested > kSaveSlotCount || requested == state.saveSlot) return;
+    state.root = ResolveSaveRoot(state.saveData, state.titleId, requested);
+    std::error_code error;
+    fs::create_directories(state.root, error);
+    state.saveSlot = requested;
+    state.live->activeSlot.store(requested);
+    Log("save slot changed to " + std::to_string(requested) + ", save directory " + state.root.string());
+}
+
 void EnsureInitialized(State& state) {
-    if (!state.root.empty()) return;
+    if (!state.root.empty()) {
+        ApplyRequestedSaveSlot(state);
+        return;
+    }
     const fs::path exeDir = ExecutableDirectory();
     if (const char* id = std::getenv("ORBIS_TITLE_ID")) state.titleId = id;
     if (state.titleId.empty()) state.titleId = ReadTitleId(exeDir / "app0" / "sce_sys" / "param.sfo");
@@ -328,7 +350,10 @@ void EnsureInitialized(State& state) {
         state.root = fs::path(dir);
     } else {
         state.saveSlot = ParseSaveSlot(std::getenv("ORBIS_SAVE_SLOT"));
-        state.root = ResolveSaveRoot(exeDir / "savedata", state.titleId, state.saveSlot);
+        state.saveData = exeDir / "savedata";
+        state.launchSlot = state.saveSlot;
+        state.root = ResolveSaveRoot(state.saveData, state.titleId, state.saveSlot);
+        state.live = anyps4::LiveSaveBlockOfThisProcess(state.saveSlot);
     }
     std::error_code error;
     fs::create_directories(state.root, error);
@@ -357,7 +382,13 @@ void TouchMtime(const fs::path& dir) {
 }
 
 s32 Unmount(State& state, Slot& slot) {
-    if (!slot.readOnly) TouchMtime(slot.hostPath);
+    if (!slot.readOnly) {
+        TouchMtime(slot.hostPath);
+        if (state.live != nullptr) {
+            state.live->lastSavedSlot.store(state.saveSlot);
+            state.live->savesDone.fetch_add(1);
+        }
+    }
     if (state.removeAlias != nullptr) state.removeAlias(slot.mountPoint.c_str());
     Log("umount " + slot.mountPoint + " (" + slot.dirName + ")");
     slot = Slot{};
@@ -398,8 +429,10 @@ ORBIS_SYSV_ABI s32 orbis_sceSaveDataMount(const Mount* mount, MountResult* resul
     const std::string dirName = CString(mount->dirName->data, sizeof mount->dirName->data);
     if (!ValidDirName(dirName)) return kErrorParameter;
     const bool create = (mount->mountMode & kModeCreate) != 0;
-    const bool createIfMissing = (mount->mountMode & kModeCreate2) != 0;
-    const bool readOnly = (mount->mountMode & kModeReadOnly) != 0 && (mount->mountMode & kModeReadWrite) == 0;
+    const bool readWrite = (mount->mountMode & kModeReadWrite) != 0;
+    const bool switched = state.live != nullptr && state.saveSlot != state.launchSlot;
+    const bool createIfMissing = (mount->mountMode & kModeCreate2) != 0 || (switched && readWrite);
+    const bool readOnly = (mount->mountMode & kModeReadOnly) != 0 && !readWrite;
     for (const Slot& slot : state.slots) {
         if (slot.used && slot.dirName == dirName) return kErrorBusy;
     }

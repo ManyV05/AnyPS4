@@ -15,6 +15,7 @@
 #include "Bundle.hpp"
 #include "DiscordPresence.hpp"
 #include "LiveAudio.hpp"
+#include "LiveSave.hpp"
 #include "PadKeyNames.hpp"
 #include "Process.hpp"
 #include "SaveBackup.hpp"
@@ -116,6 +117,8 @@ bool g_onSteam = false;
 bool g_gameRunning = false;
 HANDLE g_gameProcess = nullptr;
 unsigned long g_gamePid = 0;
+unsigned long g_saveSeenPid = 0;
+int g_saveSeen = 0;
 launcher::DiscordPresence g_presence;
 bool g_ready = false;
 std::map<int, bool> g_checked;
@@ -258,6 +261,23 @@ void RefreshGameRunning() {
     InvalidateRect(g_window, &audio, FALSE);
 }
 
+void PollSaveActivity() {
+    if (g_gamePid == 0) {
+        g_saveSeenPid = 0;
+        return;
+    }
+    launcher::SaveActivity activity;
+    if (!launcher::ReadLiveSave(g_gamePid, activity)) return;
+    if (g_saveSeenPid != g_gamePid) {
+        g_saveSeenPid = g_gamePid;
+        g_saveSeen = activity.savesDone;
+        return;
+    }
+    if (activity.savesDone == g_saveSeen) return;
+    g_saveSeen = activity.savesDone;
+    AppendLog(L"The game saved in Save Slot " + std::to_wstring(activity.lastSavedSlot) + L".");
+}
+
 std::wstring LauncherPath() {
     wchar_t buffer[MAX_PATH * 2];
     const DWORD length = GetModuleFileNameW(nullptr, buffer, static_cast<DWORD>(std::size(buffer)));
@@ -363,6 +383,8 @@ void Play() {
     ForgetGame();
     g_gameProcess = process;
     g_gamePid = GetProcessId(process);
+    g_saveSeenPid = g_gamePid;
+    g_saveSeen = 0;
     StartPresence(g_presence, g_settings, process, PostLog);
     RefreshGameRunning();
 }
@@ -682,7 +704,7 @@ void CreateControls() {
     AddCard(kPageSettings, 24, 462, 340, 176, L"SAVE SLOT");
     AddLabel(kPageSettings, 44, 496, 300, 16, L"Slot the game loads and saves in", ui::kFontSmall, ui::kText);
     AddButton(kPageSettings, kSaveSlotCaptions[SaveSlotIndex()], 44, 516, 300, 28, kIdSaveSlot);
-    AddLabel(kPageSettings, 44, 552, 300, 70, L"Each slot keeps its own game saves in savedata\\slot_N. Changing the slot never copies or deletes saves; it takes effect the next time you press PLAY. Export Saves backs up every slot.",
+    AddLabel(kPageSettings, 44, 552, 300, 70, L"Each slot keeps its own saves in savedata\\slot_N and changing it never copies or deletes saves. While the game runs, the new slot is used from its next save, autosaves included.",
              ui::kFontSmall, ui::kMuted, DT_LEFT | DT_TOP | DT_WORDBREAK);
 
     AddCard(kPageSettings, 376, 462, 340, 176, L"AUDIO");
@@ -1017,6 +1039,13 @@ void ChooseSaveSlot() {
     g_settings.saveSlot = index + 1;
     InvalidateRect(g_window, nullptr, FALSE);
     PersistSettings();
+    if (g_gamePid == 0) return;
+    const std::wstring name = L"Save Slot " + std::to_wstring(g_settings.saveSlot);
+    if (launcher::PushLiveSaveSlot(g_gamePid, g_settings.saveSlot)) {
+        AppendLog(name + L" selected. The running game uses it from its next save, autosaves included.");
+    } else {
+        AppendLog(name + L" selected, but the running game has not opened its save system yet: close it and press PLAY to use the new slot.");
+    }
 }
 
 LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -1087,6 +1116,7 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
             static int ticks = 0;
             UpdateHover();
             if (++ticks % 20 == 0) RefreshGameRunning();
+            if (ticks % 10 == 0) PollSaveActivity();
             return 0;
         }
         break;

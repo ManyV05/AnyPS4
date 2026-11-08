@@ -8,6 +8,7 @@ add_executable(anyps4_launcher WIN32
         ${CMAKE_CURRENT_SOURCE_DIR}/Zip.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/SaveBackup.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/LiveAudio.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/LiveSave.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/DiscordPresence.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Settings.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Process.cpp)
