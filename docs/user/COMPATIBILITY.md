@@ -8,6 +8,6 @@ AnyPS4 was developed and tested only for the title below. Other titles are not s
 
 ## Known limits
 
-- The distance attenuation of effects (for example the totem hum) has not been confirmed by ear; the effect volume matrix is applied by default and `ORBIS_NGS2_SPATIAL=0` turns it off.
+- Effects are placed by the volume matrix the title sends (distance and left/right position, for example the totem hum); that was checked by ear on the totem hum only.
 - Tests were sessions of a few minutes; long sessions have not been measured.
 - Save data lives in `savedata/` beside the executable and the game files are never copied: `app0` is a junction to the folder you provide.

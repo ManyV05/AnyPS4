@@ -314,7 +314,13 @@ struct Voice {
     uintptr_t patch_dest{}; // mastering voice this voice is routed into
     u64 decoded_samples{};
     u32 starved_renders{}; // consecutive render calls with no data (streaming underrun)
-    float matrix_rms{-1.0f}; // root of the sum of squares of the last volume matrix; negative until one arrives
+    // Volume matrices the title stored per matrix id (up to 64 levels each, [output][input]) and the matrix id its
+    // port 0 reads: -1 none, 0.. a stored matrix, 0x10..0x13 a built-in one (the plain front pair here).
+    static constexpr u32 kMatrixSlots = 8;
+    u32 matrix_count[kMatrixSlots]{};
+    float matrix_levels[kMatrixSlots][64]{};
+    s32 port0_matrix{-1};
+    u32 src_channels_used{1}; // channels of the source the last grain was made from
 
     // Playback cursor
     u32 block_index{};
@@ -1185,6 +1191,7 @@ void ProduceGrain(Voice& v, u32 num_samples, float gain) {
     if (src_rate == 0) {
         src_rate = 48000;
     }
+    v.src_channels_used = src_channels;
     const float step = (static_cast<float>(src_rate) / 48000.0f) * v.pitch;
     if (trace_all && !v.rate_logged) {
         // Pitch and sample-rate monitor: the file's rate as the decoder sees it
@@ -1785,30 +1792,36 @@ s32 PS4_SYSV_ABI sceNgs2SystemRender(OrbisNgs2Handle systemHandle,
                         gain = music_floor;
                     }
                 }
-                // AnyPS4: the title's volume matrix is applied to effect voices (ORBIS_NGS2_SPATIAL=<reference>
-                // changes the reference, 0 turns it off). The
-                // title sends distance attenuation, pan and fades through it for sounds like the totem hum; effects
-                // played at their port volume only. The matrix is spread over 8 speakers, so its root of squares is
-                // taken as the loudness and divided by the reference (a full-level matrix, about 0.2 in the titles'
-                // traces): louder than that is not boosted, quieter is attenuated.
-                static const float spatial_reference = [] {
-                    const char* value = std::getenv("ORBIS_NGS2_SPATIAL");
-                    return value != nullptr ? static_cast<float>(std::atof(value)) : 0.2f;
-                }();
-                if (spatial_reference > 0.0f && !voice.is_music && voice.matrix_rms >= 0.0f) {
-                    gain *= std::min(voice.matrix_rms / spatial_reference, 1.0f);
-                }
                 ProduceGrain(voice, num_samples, std::clamp(gain, 0.0f, 4.0f));
                 voice.clock_samples += num_samples;
                 voice.last_cycle = cycle;
+            }
+            // The matrix the title routes this voice's port 0 through: a stored one (id 0..) spreads the voice over the
+            // speakers (constant-power pan from sceNgs2PanGetVolumeMatrix, distance and level included); anything
+            // else (no matrix, the built-in ids 0x10..0x13) is the plain front pair.
+            const float* matrix = nullptr;
+            u32 matrix_inputs = 1;
+            if (!voice.is_music && channels >= 8 && voice.port0_matrix >= 0 &&
+                voice.port0_matrix < static_cast<s32>(Voice::kMatrixSlots)) {
+                matrix_inputs = std::min(voice.src_channels_used, 2u);
+                if (voice.matrix_count[voice.port0_matrix] >= 8 * matrix_inputs) {
+                    matrix = voice.matrix_levels[voice.port0_matrix];
+                }
             }
             float peak_left = 0.0f, peak_right = 0.0f;
             for (u32 s = 0; s < num_samples; ++s) {
                 const float* src = voice.grain_cache.data() + size_t(s) * 2;
                 float* dst = out + size_t(s) * channels;
-                dst[0] += src[0];
-                if (channels > 1) {
-                    dst[1] += src[1];
+                if (matrix != nullptr) {
+                    for (u32 o = 0; o < 8; ++o) {
+                        dst[o] += matrix_inputs == 1 ? src[0] * matrix[o]
+                                                     : src[0] * matrix[o * 2] + src[1] * matrix[o * 2 + 1];
+                    }
+                } else {
+                    dst[0] += src[0];
+                    if (channels > 1) {
+                        dst[1] += src[1];
+                    }
                 }
                 peak_left = std::max(peak_left, std::fabs(src[0]));
                 peak_right = std::max(peak_right, std::fabs(src[1]));
@@ -2056,9 +2069,16 @@ s32 PS4_SYSV_ABI sceNgs2VoiceControl(OrbisNgs2Handle voiceHandle,
             }
             break;
         }
-        case VoicePortMatrix:
-            // Routing matrix selection; irrelevant to the simple stereo mix.
+        case VoicePortMatrix: {
+            // Which stored matrix a voice port reads: -1 none, 0.. a stored one, 0x10..0x13 built-in ones.
+            if (hdr->size >= sizeof(OrbisNgs2VoicePortMatrixParam)) {
+                const auto* p = reinterpret_cast<const OrbisNgs2VoicePortMatrixParam*>(hdr);
+                if (p->port == 0) {
+                    voice.port0_matrix = p->matrixId;
+                }
+            }
             break;
+        }
         case VoiceMatrixLevels: {
             // {header, u32 matrixId, u32 numLevels, const float* aLevel}: the game
             // fades voices by ramping these. Use the front-left level as gain.
@@ -2089,13 +2109,14 @@ s32 PS4_SYSV_ABI sceNgs2VoiceControl(OrbisNgs2Handle voiceHandle,
                                  p->numLevels > 6 ? p->aLevel[6] : 0.0f,
                                  p->numLevels > 7 ? p->aLevel[7] : 0.0f);
                     }
-                    float square_sum = 0.0f;
-                    for (u32 l = 0; l < std::min(p->numLevels, 16u); ++l) {
-                        if (std::isfinite(p->aLevel[l])) {
-                            square_sum += p->aLevel[l] * p->aLevel[l];
+                    if (p->matrixId < Voice::kMatrixSlots) {
+                        const u32 count = std::min(p->numLevels, 64u);
+                        for (u32 l = 0; l < count; ++l) {
+                            const float level = p->aLevel[l];
+                            voice.matrix_levels[p->matrixId][l] = std::isfinite(level) ? std::clamp(level, 0.0f, 4.0f) : 0.0f;
                         }
+                        voice.matrix_count[p->matrixId] = count;
                     }
-                    voice.matrix_rms = std::sqrt(square_sum);
                     voice.matrix_gain = std::clamp(peak, 0.0f, 4.0f);
                 }
             }
@@ -2455,64 +2476,215 @@ s32 PS4_SYSV_ABI sceNgs2GeomApply(const OrbisNgs2GeomListenerWork* listener,
 
 // Ngs2Pan
 
+namespace {
+// ---- Ngs2Pan: constant-power pairwise panning over the speakers, as in the platform library ----
+// The work area holds the speaker angles sorted ascending (the first one repeated a turn later as the closing
+// edge), the unit angle and the speaker count; the title only hands the buffer around.
+struct PanWorkLayout {
+    float angle[8];
+    float unit;
+    u32 count;
+};
+
+constexpr float kPanPi = 3.14159265f;
+
+// Sorted position -> index in the order the title lists the speakers (FL FR FC SL SR BL BR for 7, FL FR FC BL BR
+// for 5, FL FR BL BR for 4, FL FR for 2), and the output slot (FL FR FC LFE SL SR BL BR) of each listed speaker.
+constexpr u8 kPanSortedToListed[8][7] = {
+    {},
+    {},
+    {1, 0},
+    {},
+    {1, 3, 2, 0},
+    {2, 1, 4, 3, 0},
+    {},
+    {2, 1, 4, 6, 5, 3, 0},
+};
+constexpr u8 kPanListedToSlot[8][7] = {
+    {},
+    {},
+    {0, 1},
+    {},
+    {0, 1, 4, 5},
+    {0, 1, 2, 4, 5},
+    {},
+    {0, 1, 2, 4, 5, 6, 7},
+};
+constexpr float kPanDefaultDegrees[8][7] = {
+    {},
+    {},
+    {90.0f, 270.0f},
+    {},
+    {40.0f, 110.0f, 250.0f, 320.0f},
+    {0.0f, 40.0f, 110.0f, 250.0f, 320.0f},
+    {},
+    {0.0f, 40.0f, 110.0f, 150.0f, 210.0f, 250.0f, 320.0f},
+};
+
+bool PanValidSpeakers(u32 count) {
+    return count == 2 || count == 4 || count == 5 || count == 7;
+}
+
+bool PanValidUnit(float unit) {
+    return unit == 360.0f || unit == 6.2831855f;
+}
+
+// Mix the speaker slots (FL FR FC LFE SL SR BL BR) down to `out` channels (1, 2, 6 or 8).
+void PanSlotsToOutput(const float* slot, u32 slots, u32 out, float* result) {
+    constexpr float kHalfRoot = 0.70710678f;
+    if (out == 8) {
+        for (u32 o = 0; o < 8; ++o) {
+            result[o] = o < slots ? slot[o] : 0.0f;
+        }
+    } else if (out == 6) {
+        for (u32 o = 0; o < 6; ++o) {
+            result[o] = slot[o];
+        }
+        if (slots == 8) {
+            result[4] += slot[6];
+            result[5] += slot[7];
+        }
+    } else if (out == 2) {
+        if (slots == 2) {
+            result[0] = slot[0];
+            result[1] = slot[1];
+        } else {
+            result[0] = slot[0] + kHalfRoot * slot[2] + 0.5f * slot[4] + (slots == 8 ? 0.5f * slot[6] : 0.0f);
+            result[1] = slot[1] + kHalfRoot * slot[2] + 0.5f * slot[5] + (slots == 8 ? 0.5f * slot[7] : 0.0f);
+        }
+    } else {
+        if (slots == 2) {
+            result[0] = kHalfRoot * (slot[0] + slot[1]);
+        } else {
+            result[0] = kHalfRoot * (slot[0] + slot[1]) + slot[2] + 0.5f * (slot[4] + slot[5]) +
+                        (slots == 8 ? 0.5f * (slot[6] + slot[7]) : 0.0f);
+        }
+    }
+}
+
+s32 PanInitImpl(PanWorkLayout* work, const float* aSpeakerAngle, float unitAngle, u32 numSpeakers) {
+    if (!PanValidUnit(unitAngle)) {
+        return ORBIS_NGS2_ERROR_INVALID_PAN_UNIT_ANGLE;
+    }
+    if (!PanValidSpeakers(numSpeakers)) {
+        return ORBIS_NGS2_ERROR_INVALID_PAN_SPEAKER;
+    }
+    float listed[7] = {};
+    for (u32 i = 0; i < numSpeakers; ++i) {
+        if (aSpeakerAngle != nullptr) {
+            float value = std::isfinite(aSpeakerAngle[i]) ? std::fmod(aSpeakerAngle[i], unitAngle) : 0.0f;
+            listed[i] = value < 0.0f ? value + unitAngle : value;
+        } else {
+            const float degrees = kPanDefaultDegrees[numSpeakers][i];
+            listed[i] = unitAngle == 360.0f ? degrees : degrees / 180.0f * kPanPi;
+        }
+    }
+    // Sorted order: the default lists above are already in sorted order, a list from the title is in the
+    // listed order and goes through the permutation.
+    float sorted[8] = {};
+    for (u32 k = 0; k < numSpeakers; ++k) {
+        sorted[k] = aSpeakerAngle != nullptr ? listed[kPanSortedToListed[numSpeakers][k]] : listed[k];
+    }
+    sorted[numSpeakers] = sorted[0] + unitAngle;
+    std::memset(work, 0, sizeof(PanWorkLayout));
+    for (u32 k = 0; k <= numSpeakers; ++k) {
+        work->angle[k] = sorted[k];
+    }
+    work->unit = unitAngle;
+    work->count = numSpeakers;
+    return ORBIS_OK;
+}
+
+// aParam: {angle, distance, fbwLevel, lfeLevel} per source. The matrix is laid out [output channel][source].
+s32 PanGetVolumeMatrixImpl(const PanWorkLayout* work, const float* aParam, u32 numParams, u32 matrixFormat,
+                           float* outMatrix) {
+    if (matrixFormat != 1 && matrixFormat != 2 && matrixFormat != 6 && matrixFormat != 8) {
+        return ORBIS_NGS2_ERROR_INVALID_PAN_MATRIX_FORMAT;
+    }
+    if (!PanValidSpeakers(work->count)) {
+        return ORBIS_NGS2_ERROR_INVALID_PAN_SPEAKER;
+    }
+    if (!PanValidUnit(work->unit)) {
+        return ORBIS_NGS2_ERROR_INVALID_PAN_UNIT_ANGLE;
+    }
+    if (numParams > 8) {
+        return ORBIS_NGS2_ERROR_INVALID_NUM_CHANNELS;
+    }
+    const u32 count = work->count;
+    const u32 slots = count == 2 ? 2 : count == 7 ? 8 : 6;
+    std::memset(outMatrix, 0, size_t(numParams) * matrixFormat * sizeof(float));
+    for (u32 p = 0; p < numParams; ++p) {
+        const float* param = aParam + size_t(p) * 4;
+        const float angle = std::isfinite(param[0]) ? param[0] : 0.0f;
+        // distance runs from -1 (the opposite side) over 0 (all around, no direction) to 1 (exactly at the angle).
+        const float spread = std::isfinite(param[1]) ? std::clamp(param[1], -1.0f, 1.0f) : 0.0f;
+        const float fbw = std::isfinite(param[2]) ? param[2] : 0.0f;
+        const float lfe = std::isfinite(param[3]) ? param[3] : 0.0f;
+        const float near_weight = std::sin((spread + 1.0f) * 0.5f * kPanPi * 0.5f);
+        const float far_weight = std::sin((1.0f - spread) * 0.5f * kPanPi * 0.5f);
+        float gain[8] = {};
+        const float first = work->angle[0];
+        const auto place = [&](float at, float weight) {
+            float wrapped = std::fmod(at - first, work->unit);
+            if (wrapped < 0.0f) {
+                wrapped += work->unit;
+            }
+            at = first + wrapped;
+            for (u32 k = 1; k <= count; ++k) {
+                if (at < work->angle[k]) {
+                    const float low = work->angle[k - 1];
+                    const float width = work->angle[k] - low;
+                    const float t = width > 0.0f ? (at - low) / width : 0.0f;
+                    gain[k - 1] += weight * std::sin((1.0f - t) * kPanPi * 0.5f);
+                    gain[k] += weight * std::sin(t * kPanPi * 0.5f);
+                    break;
+                }
+            }
+        };
+        place(angle, near_weight);
+        place(angle + work->unit * 0.5f, far_weight);
+        gain[0] += gain[count];
+        float slot[8] = {};
+        for (u32 k = 0; k < count; ++k) {
+            slot[kPanListedToSlot[count][kPanSortedToListed[count][k]]] = fbw * gain[k];
+        }
+        if (slots > 2) {
+            slot[3] = lfe;
+        }
+        float result[8] = {};
+        PanSlotsToOutput(slot, slots, matrixFormat, result);
+        for (u32 o = 0; o < matrixFormat; ++o) {
+            outMatrix[size_t(o) * numParams + p] += result[o];
+        }
+    }
+    return ORBIS_OK;
+}
+} // namespace
+
 s32 PS4_SYSV_ABI sceNgs2PanInit(OrbisNgs2PanWork* work, const float* aSpeakerAngle, float unitAngle,
                                 u32 numSpeakers) {
     LOG_INFO(Lib_Ngs2, "unitAngle = {}, numSpeakers = {}", unitAngle, numSpeakers);
     if (!work) {
-        return ORBIS_NGS2_ERROR_INVALID_OUT_ADDRESS;
+        return ORBIS_NGS2_ERROR_INVALID_PAN_WORK;
     }
-    work->numSpeakers = std::min<u32>(numSpeakers, ORBIS_NGS2_MAX_VOICE_CHANNELS);
-    work->unitAngle = unitAngle != 0.0f ? unitAngle : 6.2831853f;
-    for (u32 i = 0; i < ORBIS_NGS2_MAX_VOICE_CHANNELS; ++i) {
-        work->aSpeakerAngle[i] =
-            (aSpeakerAngle && i < work->numSpeakers) ? aSpeakerAngle[i] : 0.0f;
-    }
-    return ORBIS_OK;
+    return PanInitImpl(reinterpret_cast<PanWorkLayout*>(work), aSpeakerAngle, unitAngle, numSpeakers);
 }
 
 s32 PS4_SYSV_ABI sceNgs2PanGetVolumeMatrix(OrbisNgs2PanWork* work, const OrbisNgs2PanParam* aParam,
                                            u32 numParams, u32 matrixFormat,
                                            float* outVolumeMatrix) {
     LOG_DEBUG(Lib_Ngs2, "numParams = {}, matrixFormat = {}", numParams, matrixFormat);
-    if (!work || !outVolumeMatrix) {
+    if (!work) {
+        return ORBIS_NGS2_ERROR_INVALID_PAN_WORK;
+    }
+    if (!aParam) {
+        return ORBIS_NGS2_ERROR_INVALID_PAN_PARAM;
+    }
+    if (!outVolumeMatrix) {
         return ORBIS_NGS2_ERROR_INVALID_OUT_ADDRESS;
     }
-    const u32 speakers = std::max(1u, work->numSpeakers);
-    const float span = std::fabs(work->unitAngle) > 1e-6f ? work->unitAngle : 6.2831853f;
-    constexpr float kTwoPi = 6.2831853f;
-    for (u32 p = 0; p < numParams; ++p) {
-        const OrbisNgs2PanParam& param = aParam ? aParam[p] : OrbisNgs2PanParam{};
-        const float level =
-            std::isfinite(param.fbwLevel) ? std::clamp(param.fbwLevel, 0.0f, 4.0f) : 1.0f;
-        // Simple distance attenuation: 1 at 0, softening with distance.
-        const float dist = std::isfinite(param.distance) ? std::max(param.distance, 0.0f) : 0.0f;
-        const float atten = 1.0f / (1.0f + dist);
-        float* row = outVolumeMatrix + size_t(p) * speakers;
-        float total = 0.0f;
-        for (u32 s = 0; s < speakers; ++s) {
-            // Angular proximity window between the source angle and each speaker.
-            float delta = param.angle - work->aSpeakerAngle[s];
-            delta = std::fmod(delta + kTwoPi * 4, kTwoPi);
-            if (delta > kTwoPi / 2) {
-                delta -= kTwoPi;
-            }
-            const float w = std::max(0.0f, 1.0f - std::fabs(delta) / (span * 0.5f + 1e-6f));
-            row[s] = w;
-            total += w;
-        }
-        if (total <= 1e-6f) {
-            // Source between speakers: give everything to the front pair.
-            for (u32 s = 0; s < speakers; ++s) {
-                row[s] = s < 2 ? 0.7071f : 0.0f;
-            }
-            total = 1.4142f;
-        }
-        // Normalize to constant power and apply source level and distance.
-        for (u32 s = 0; s < speakers; ++s) {
-            row[s] = row[s] / total * level * atten;
-        }
-    }
-    return ORBIS_OK;
+    return PanGetVolumeMatrixImpl(reinterpret_cast<const PanWorkLayout*>(work),
+                                  reinterpret_cast<const float*>(aParam), numParams, matrixFormat, outVolumeMatrix);
 }
 
 // Ngs2Report
