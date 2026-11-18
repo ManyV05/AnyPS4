@@ -39,10 +39,12 @@ constexpr s32 kPortTypeBgm = 1;
 constexpr s32 kPortTypePadSpk = 4;
 constexpr std::size_t kMaxPorts = 16;
 constexpr u32 kMixFrequency = 48000;
-constexpr u32 kMixFrames = 960;
-constexpr std::size_t kRingBuffers = 12;
-constexpr u32 kQueueAheadChunks = 8;
-constexpr u32 kStarvedChunks = 1;
+// The waveOut ring is refilled the moment a block completes, so it is always full and its depth (blocks * frames)
+// is a permanent delay on top of the port queue. 4 x 480 frames is 40 ms (it was 12 x 960 = 240 ms).
+constexpr u32 kMixFrames = 480;
+constexpr std::size_t kRingBuffers = 4;
+constexpr u32 kQueueAheadChunks = 6;  // chunks a port may run ahead of the mixer
+constexpr u32 kStarvedChunks = 2;     // below this lead the title stops sleeping and refills
 constexpr float kFrontGain = 0.5f;
 constexpr float kCenterGain = 0.70710678f;
 constexpr float kLfeGain = 0.15f;
