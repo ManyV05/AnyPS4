@@ -184,8 +184,7 @@ void Trace(const char* function, const char* nid) {
 }
 
 void Log(const std::string& text) {
-    std::fprintf(stderr, "[SaveData] %s\n", text.c_str());
-    std::fflush(stderr);
+    ORBIS_LOG_STDERR("[SaveData] %s\n", text.c_str());
 }
 
 fs::path ExecutableDirectory() {

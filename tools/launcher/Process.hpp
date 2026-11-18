@@ -11,6 +11,7 @@ using LineSink = std::function<void(const std::wstring&)>;
 
 bool RunCaptured(const std::wstring& commandLine, const std::wstring& workingDirectory, LineSink sink, int& exitCode);
 
+// logFile receives the game's stdout and stderr; an empty name discards them (NUL device, no console window).
 bool StartDetached(const std::wstring& executable, const std::wstring& workingDirectory, const std::vector<std::pair<std::wstring, std::wstring>>& environment,
                    const std::wstring& logFile, std::wstring& error, HANDLE* process = nullptr);
 

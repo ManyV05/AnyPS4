@@ -90,7 +90,7 @@ libs/
 app0/                     directory junction to the game folder
 anyps4/
     pad.ini               keyboard mapping
-    log/, audio_dumps/    diagnostics (created when used)
+    log/, audio_dumps/    diagnostics (created only when Diagnostics is on or a dump is requested)
 savedata/
     slot_1/ ... slot_5/   one set of saves per slot (slot_1 holds the saves of installs made before slots)
 ```
@@ -131,7 +131,8 @@ Unsupported or unexpected states strictly throw `std::runtime_error`. `what()` i
 - `ORBIS_AUDIO_DUMP=<folder>` writes WAV files of every audio port and of the final mix (`ORBIS_AUDIO_DUMP_START` and `ORBIS_AUDIO_DUMP_SECONDS` choose the window).
 - A circular audio recorder keeps the last 30 s of port 2 and of the final mix. Creating or touching `dump_now.txt` in the working directory writes them to `anyps4/audio_dumps/flight-<stamp>/`, with `audio_levels.txt` and `ngs2_state.txt` (every NGS2 rack and voice). `ORBIS_AUDIO_RING=0` turns it off.
 - `ORBIS_GNM_LOG=info` (or `debug`, `trace`) raises the renderer and NGS2 log level; the default is warnings and errors.
-- The launcher's **Diagnostics** option turns on `info` logging, which writes to disk on the game thread and slows the game, more the longer the session; leave it off to play. At `info` level the renderer also logs, every 600 flips, the average and maximum milliseconds spent in frame, acquire, submit, present and the pacing sleep (`flip timing up to #N`), which tells a slow frame in the game thread from one spent presenting. The depth-overlap messages of the texture cache are `debug` level.
+- `ORBIS_LOG=off` (or `0`) switches all logging off: the libraries do not format their own lines and the renderer and NGS2 log nothing. `ORBIS_GNM_LOG=off` does the same for the renderer and NGS2 only.
+- The launcher's **Diagnostics** option turns on `info` logging into `anyps4/log/session-<time>.log`, which writes to disk on the game thread and slows the game, more the longer the session. With the option off, nothing is logged at all: no log file is created, no console window appears, the game's output is discarded and the log switches above are set to `off`, so not even warnings and errors are recorded. Turn it on to get a log for a bug report. At `info` level the renderer also logs, every 600 flips, the average and maximum milliseconds spent in frame, acquire, submit, present and the pacing sleep (`flip timing up to #N`), which tells a slow frame in the game thread from one spent presenting. The depth-overlap messages of the texture cache are `debug` level.
 - [tools/import_audit.py](../../tools/import_audit.py) lists the system functions a converted game imports and whether the built libraries provide them, before the game is launched (needs Python 3 only):
 
 ```sh

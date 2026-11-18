@@ -146,8 +146,7 @@ void Trace(const char* function, const char* nid) {
 }
 
 void Log(const char* text) {
-    std::fprintf(stderr, "[SaveDataDialog] %s\n", text);
-    std::fflush(stderr);
+    ORBIS_LOG_STDERR("[SaveDataDialog] %s\n", text);
 }
 
 anyps4::LiveSaveBlock* PromptBlock() {

@@ -222,8 +222,7 @@ FILE* OpenDump(const Dump& dump, const char* name, u32 freq, u32 channels, bool 
     std::snprintf(text, sizeof text, "%s %s (%u Hz, %u ch, %s)",
                   file != nullptr ? "dumping to" : "cannot open", path, freq, channels,
                   isFloat ? "float32" : "int16");
-    std::fprintf(stderr, "[AudioOut] %s\n", text);
-    std::fflush(stderr);
+    ORBIS_LOG_STDERR("[AudioOut] %s\n", text);
     if (file != nullptr) {
         WriteWavHeader(file, freq, channels, isFloat, 0);
     }
@@ -406,8 +405,7 @@ void PollFlightTrigger(State& state) {
     }
     const char* rootEnv = std::getenv("ORBIS_AUDIO_FLIGHT_DIR");
     const std::filesystem::path folder = std::filesystem::path(rootEnv != nullptr ? rootEnv : "anyps4/audio_dumps") / ("flight-" + std::to_string(stamp));
-    std::fprintf(stderr, "[AudioOut] flight recorder triggered: writing %zu rings to %s\n", copies.size(), folder.string().c_str());
-    std::fflush(stderr);
+    ORBIS_LOG_STDERR("[AudioOut] flight recorder triggered: writing %zu rings to %s\n", copies.size(), folder.string().c_str());
     std::thread([folder, copies = std::move(copies)]() {
         std::error_code createError;
         std::filesystem::create_directories(folder, createError);
@@ -415,8 +413,7 @@ void PollFlightTrigger(State& state) {
         if (levels == nullptr) return;
         for (const auto& [ring, data] : copies) WriteFlightRing(folder, ring, data, levels);
         std::fclose(levels);
-        std::fprintf(stderr, "[AudioOut] flight recorder: wrote %s\n", folder.string().c_str());
-        std::fflush(stderr);
+        ORBIS_LOG_STDERR("[AudioOut] flight recorder: wrote %s\n", folder.string().c_str());
     }).detach();
 }
 
@@ -431,8 +428,7 @@ void Trace(const char* function, const char* nid) {
 }
 
 void Log(const char* text) {
-    std::fprintf(stderr, "[AudioOut] %s\n", text);
-    std::fflush(stderr);
+    ORBIS_LOG_STDERR("[AudioOut] %s\n", text);
 }
 
 Port* GetPort(s32 handle) {
