@@ -358,6 +358,7 @@ struct Voice {
     std::vector<float> grain_cache; // stereo L/R pairs
     u32 grain_len{};
     bool clock_valid{};
+    u64 last_cycle = ~0ull; // audio output cycle in which this voice last produced a grain
     std::chrono::steady_clock::time_point clock_start{};
     u64 clock_samples{}; // output samples produced since clock_start
 
@@ -1696,6 +1697,19 @@ s32 PS4_SYSV_ABI sceNgs2SystemRender(OrbisNgs2Handle systemHandle,
                      double(voice.decoded_samples) / 48000.0, voice.starved_renders, voice.paused, voice.blocks.size());
         }
     }
+    // A voice advances once per audio output cycle (one chunk accepted by the title's primary audio port), not by the
+    // wall clock: the title renders each system into several buffers per cycle, the first render of a cycle produces
+    // a grain and the others replay it. A wall-clock gate drifts against the audio device and repeats or skips a chunk
+    // (audible crackle). Without a counter that is advancing, the wall-clock gate below is used.
+    static u64 seen_cycle = ~0ull;
+    static std::chrono::steady_clock::time_point cycle_changed = std::chrono::steady_clock::now();
+    const u64 cycle = anyps4::LiveOutputCycle();
+    if (cycle != seen_cycle) {
+        seen_cycle = cycle;
+        cycle_changed = std::chrono::steady_clock::now();
+    }
+    const bool output_paced = anyps4::LiveOutputCycleAvailable() &&
+                              std::chrono::steady_clock::now() - cycle_changed < std::chrono::milliseconds(250);
     for (u32 i = 0; i < numBufferInfo; ++i) {
         auto& info = aBufferInfo[i];
         const u32 channels = std::max(1u, info.numChannels);
@@ -1752,7 +1766,8 @@ s32 PS4_SYSV_ABI sceNgs2SystemRender(OrbisNgs2Handle systemHandle,
                               std::chrono::duration<double>(double(voice.clock_samples) /
                                                             48000.0));
             }
-            if (ahead < grain_window || voice.grain_len != num_samples) {
+            if (output_paced ? (voice.last_cycle != cycle || voice.grain_len != num_samples)
+                             : (ahead < grain_window || voice.grain_len != num_samples)) {
                 // Gain: port volume; for music also the matrix peak (the game's
                 // fade engine ramps music in/out through matrix levels — without
                 // it, crossfade successor tracks play at their initial silence).
@@ -1785,6 +1800,7 @@ s32 PS4_SYSV_ABI sceNgs2SystemRender(OrbisNgs2Handle systemHandle,
                 }
                 ProduceGrain(voice, num_samples, std::clamp(gain, 0.0f, 4.0f));
                 voice.clock_samples += num_samples;
+                voice.last_cycle = cycle;
             }
             float peak_left = 0.0f, peak_right = 0.0f;
             for (u32 s = 0; s < num_samples; ++s) {

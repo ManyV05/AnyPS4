@@ -20,6 +20,8 @@ struct LiveAudioBlock {
     std::atomic<float> bgm;
     std::atomic<float> main;
     std::atomic<float> musicFloor;
+    // Chunks accepted on the primary mixed audio port; NGS2 advances its voices once per chunk.
+    std::atomic<std::uint64_t> outputCycle;
 };
 
 static_assert(std::atomic<float>::is_always_lock_free, "the live audio block is shared between processes");
@@ -72,6 +74,20 @@ inline float LiveMusicFloor() {
     static const float fallback = LiveEnvironmentValue("ORBIS_NGS2_MUSIC_FLOOR", 0.0f);
     const LiveAudioBlock* block = LiveAudioBlockOfThisProcess();
     return block != nullptr ? block->musicFloor.load(std::memory_order_relaxed) : fallback;
+}
+
+inline std::uint64_t LiveOutputCycle() {
+    const LiveAudioBlock* block = LiveAudioBlockOfThisProcess();
+    return block != nullptr ? block->outputCycle.load(std::memory_order_acquire) : 0;
+}
+
+inline bool LiveOutputCycleAvailable() {
+    return LiveAudioBlockOfThisProcess() != nullptr;
+}
+
+inline void LiveOutputCycleAdvance() {
+    LiveAudioBlock* block = LiveAudioBlockOfThisProcess();
+    if (block != nullptr) block->outputCycle.fetch_add(1, std::memory_order_release);
 }
 
 }  // namespace anyps4

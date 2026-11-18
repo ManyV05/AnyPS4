@@ -185,6 +185,7 @@ struct State {
     Mixer mixer;
     Dump dump;
     Flight flight;
+    s32 primaryHandle = -1;  // the mixed port whose chunks count as audio cycles for NGS2
 };
 
 void WriteWavHeader(FILE* file, u32 freq, u32 channels, bool isFloat, u64 dataBytes) {
@@ -690,6 +691,9 @@ s32 Output(s32 handle, const void* data) {
     RecordPortChunk(state, *port, handle, data);
     ConvertChunk(*port, data);
     ++port->outputs;
+    // One chunk accepted on the primary port is one audio cycle; NGS2 produces one grain per voice per cycle.
+    if (state.primaryHandle < 0) state.primaryHandle = handle;
+    if (handle == state.primaryHandle) anyps4::LiveOutputCycleAdvance();
     Report(state, *port, handle);
     return static_cast<s32>(port->samples);
 }
@@ -746,6 +750,7 @@ ORBIS_SYSV_ABI s32 orbis_sceAudioOutClose(s32 handle) {
     std::lock_guard guard(state.lock);
     Port* port = GetPort(handle);
     if (port == nullptr) return kErrorInvalidPort;
+    if (handle == state.primaryHandle) state.primaryHandle = -1;
     *port = Port{};
     return 0;
 }
