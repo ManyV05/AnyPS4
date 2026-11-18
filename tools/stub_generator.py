@@ -607,8 +607,22 @@ COMMON_HEADER = """#ifndef CORE_LIBS_ORBIS_COMMON_ORBISHLE_HPP
 #define CORE_LIBS_ORBIS_COMMON_ORBISHLE_HPP
 
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 
 #define ORBIS_SYSV_ABI __attribute__((sysv_abi))
+
+// ORBIS_LOG=off (or 0) silences the library's own log lines. The launcher sets it when Diagnostics is off.
+inline bool OrbisLogEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("ORBIS_LOG");
+        return value == nullptr || (std::strcmp(value, "off") != 0 && std::strcmp(value, "0") != 0);
+    }();
+    return enabled;
+}
+
+#define ORBIS_LOG_STDERR(...) do { if (OrbisLogEnabled()) { std::fprintf(stderr, __VA_ARGS__); std::fflush(stderr); } } while (0)
 
 extern "C" void OrbisHleTrace(const char* module, const char* function, const char* nid, std::uint64_t calls, const void* site);
 extern "C" std::int32_t OrbisUserDefinedParam(std::int32_t index);
@@ -656,7 +670,7 @@ bool traceEveryCall() {
 }
 
 extern "C" void OrbisHleTrace(const char* module, const char* function, const char* nid, const std::uint64_t calls, const void* site) {
-    if (calls != 1 && !traceEveryCall()) return;
+    if (!OrbisLogEnabled() || (calls != 1 && !traceEveryCall())) return;
     const auto image = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
     const auto address = reinterpret_cast<std::uintptr_t>(site);
     const long long offset = image != 0 && address > image ? static_cast<long long>(address - image - 0x10000) : -1;

@@ -361,20 +361,26 @@ bool LaunchTitle(Settings& settings, HANDLE* process, const std::function<void(c
     std::filesystem::create_directories(std::filesystem::path(settings.installDirectory) / L"savedata" / (L"slot_" + std::to_wstring(saveSlot)), slotError);
     environment.emplace_back(L"ORBIS_NGS2_TRACE", settings.diagnostics ? L"1" : L"");
     environment.emplace_back(L"ORBIS_GNM_DUMP_EVERY", settings.diagnostics ? L"3000" : L"");
-    environment.emplace_back(L"ORBIS_GNM_LOG", settings.diagnostics ? L"info" : L"");
-    std::error_code logError;
-    const std::filesystem::path logDirectory = std::filesystem::path(settings.installDirectory) / L"anyps4" / L"log";
-    std::filesystem::create_directories(logDirectory, logError);
-    SYSTEMTIME now{};
-    GetLocalTime(&now);
-    wchar_t stamp[32];
-    swprintf(stamp, 32, L"%04u%02u%02u-%02u%02u%02u", now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond);
-    const std::wstring logFile = (logDirectory / (std::wstring(L"session-") + stamp + L".log")).wstring();
+    // Diagnostics off means no logging at all: the renderer and NGS2 log level is off, the libraries do not format their
+    // own lines (ORBIS_LOG), and the game's output is discarded: no log file, no console window.
+    environment.emplace_back(L"ORBIS_GNM_LOG", settings.diagnostics ? L"info" : L"off");
+    environment.emplace_back(L"ORBIS_LOG", settings.diagnostics ? L"" : L"off");
+    std::wstring logFile;
+    if (settings.diagnostics) {
+        std::error_code logError;
+        const std::filesystem::path logDirectory = std::filesystem::path(settings.installDirectory) / L"anyps4" / L"log";
+        std::filesystem::create_directories(logDirectory, logError);
+        SYSTEMTIME now{};
+        GetLocalTime(&now);
+        wchar_t stamp[32];
+        swprintf(stamp, 32, L"%04u%02u%02u-%02u%02u%02u", now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond);
+        logFile = (logDirectory / (std::wstring(L"session-") + stamp + L".log")).wstring();
+    }
     std::wstring error;
     if (launcher::StartDetached(executable, settings.installDirectory, environment, logFile, error, process)) {
         log(L"Started " + executable + (settings.uncappedFps ? std::wstring(L" (FPS unlocked") : L" (present " + settings.presentMode + L", frame limit " +
                   (std::to_wstring(settings.fpsCap) + L" fps")) + L", BGM " + std::to_wstring(settings.bgmVolume) + L" %, voices " +
-                  std::to_wstring(settings.mainVolume) + L" %, save slot " + std::to_wstring(saveSlot) + (settings.diagnostics ? L", diagnostics on" : L"") + L"); log " + logFile);
+                  std::to_wstring(settings.mainVolume) + L" %, save slot " + std::to_wstring(saveSlot) + (settings.diagnostics ? L", diagnostics on); log " + logFile : std::wstring(L"); logging off")));
         return true;
     }
     log(L"Could not start the title: " + error);

@@ -14,6 +14,11 @@ namespace Common::Log {
 namespace {
 
 Level ThresholdFromEnvironment() {
+    // ORBIS_LOG=off (or 0) switches all logging off; the launcher sets it when Diagnostics is off.
+    const char* everything = std::getenv("ORBIS_LOG");
+    if (everything != nullptr && (std::strcmp(everything, "off") == 0 || std::strcmp(everything, "0") == 0)) {
+        return static_cast<Level>(static_cast<int>(Level::Critical) + 1);
+    }
     const char* value = std::getenv("ORBIS_GNM_LOG");
     if (value == nullptr) {
         return Level::Warning;

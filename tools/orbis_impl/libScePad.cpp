@@ -147,8 +147,7 @@ void LoadMapping() {
     const char* configured = std::getenv("ORBIS_PAD_CONFIG");
     const std::string path = configured != nullptr ? std::string(configured) : ExecutableDirectory() + "\\anyps4\\pad.ini";
     if (GetFileAttributesA(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
-        std::fprintf(stderr, "[Pad] no %s: default keyboard mapping, XInput on\n", path.c_str());
-        std::fflush(stderr);
+        ORBIS_LOG_STDERR("[Pad] no %s: default keyboard mapping, XInput on\n", path.c_str());
         return;
     }
     char value[64];
@@ -159,8 +158,7 @@ void LoadMapping() {
     mapping.xinput = GetPrivateProfileIntA("pad", "xinput", 1, path.c_str()) != 0;
     std::string summary;
     for (std::size_t k = 0; k < count && k < mapping.keys.size(); ++k) summary += std::string(k == 0 ? "" : ", ") + bindings[k].setting + "=" + anyps4::PadKeyName_(mapping.keys[k]);
-    std::fprintf(stderr, "[Pad] mapping from %s: %s; XInput %s\n", path.c_str(), summary.c_str(), mapping.xinput ? "on" : "off");
-    std::fflush(stderr);
+    ORBIS_LOG_STDERR("[Pad] mapping from %s: %s; XInput %s\n", path.c_str(), summary.c_str(), mapping.xinput ? "on" : "off");
 }
 
 bool ReadXInput(PadData* data, u32& buttons) {
@@ -172,8 +170,7 @@ bool ReadXInput(PadData* data, u32& buttons) {
     xinputChecked = now;
     const bool connected = result == ERROR_SUCCESS;
     if (connected != xinputConnected) {
-        std::fprintf(stderr, "[Pad] XInput gamepad %s\n", connected ? "connected" : "disconnected");
-        std::fflush(stderr);
+        ORBIS_LOG_STDERR("[Pad] XInput gamepad %s\n", connected ? "connected" : "disconnected");
         xinputConnected = connected;
     }
     if (!connected) return false;
@@ -246,8 +243,7 @@ void LoadScript() {
         if (fields < 3) continue;
         script.push_back({start, static_cast<u32>(std::strtoul(buttons, nullptr, 0)), duration, lx, ly, rx, ry});
     }
-    std::fprintf(stderr, "[Pad] scripted input: %zu presses from %s\n", script.size(), path);
-    std::fflush(stderr);
+    ORBIS_LOG_STDERR("[Pad] scripted input: %zu presses from %s\n", script.size(), path);
 }
 
 ScriptedState Scripted(std::uint64_t elapsedMs) {
@@ -306,8 +302,7 @@ ORBIS_SYSV_ABI s32 orbis_scePadInit() {
 ORBIS_SYSV_ABI s32 orbis_scePadOpen(s32 userId, s32 type, s32 index, const void*) {
     Trace("scePadOpen", "xk0AcarP3V4");
     if (type != 0 && type != 1) return kErrorInvalidArg;
-    std::fprintf(stderr, "[Pad] scePadOpen(user %d, type %d, index %d) -> handle %d\n", userId, type, index, kHandle);
-    std::fflush(stderr);
+    ORBIS_LOG_STDERR("[Pad] scePadOpen(user %d, type %d, index %d) -> handle %d\n", userId, type, index, kHandle);
     LoadMapping();
     open = true;
     return kHandle;
@@ -367,9 +362,8 @@ ORBIS_SYSV_ABI s32 orbis_scePadReadState(s32 handle, PadData* data) {
     if (scripted.rx >= 0) data->rightStick.x = static_cast<u8>(scripted.rx);
     if (scripted.ry >= 0) data->rightStick.y = static_cast<u8>(scripted.ry);
     if (buttons != lastButtons) {
-        std::fprintf(stderr, "[Pad] t=%llu ms buttons %#x -> %#x (read #%llu)\n", static_cast<unsigned long long>(elapsedMs), lastButtons, buttons,
+        ORBIS_LOG_STDERR("[Pad] t=%llu ms buttons %#x -> %#x (read #%llu)\n", static_cast<unsigned long long>(elapsedMs), lastButtons, buttons,
                      static_cast<unsigned long long>(readCount));
-        std::fflush(stderr);
         lastButtons = buttons;
     }
     data->buttons = buttons;

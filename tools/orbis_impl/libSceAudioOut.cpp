@@ -39,10 +39,12 @@ constexpr s32 kPortTypeBgm = 1;
 constexpr s32 kPortTypePadSpk = 4;
 constexpr std::size_t kMaxPorts = 16;
 constexpr u32 kMixFrequency = 48000;
-constexpr u32 kMixFrames = 960;
-constexpr std::size_t kRingBuffers = 12;
-constexpr u32 kQueueAheadChunks = 8;
-constexpr u32 kStarvedChunks = 1;
+// The waveOut ring is refilled the moment a block completes, so it is always full and its depth (blocks * frames)
+// is a permanent delay on top of the port queue. 4 x 480 frames is 40 ms (it was 12 x 960 = 240 ms).
+constexpr u32 kMixFrames = 480;
+constexpr std::size_t kRingBuffers = 4;
+constexpr u32 kQueueAheadChunks = 6;  // chunks a port may run ahead of the mixer
+constexpr u32 kStarvedChunks = 2;     // below this lead the title stops sleeping and refills
 constexpr float kFrontGain = 0.5f;
 constexpr float kCenterGain = 0.70710678f;
 constexpr float kLfeGain = 0.15f;
@@ -185,6 +187,7 @@ struct State {
     Mixer mixer;
     Dump dump;
     Flight flight;
+    s32 primaryHandle = -1;  // the mixed port whose chunks count as audio cycles for NGS2
 };
 
 void WriteWavHeader(FILE* file, u32 freq, u32 channels, bool isFloat, u64 dataBytes) {
@@ -219,8 +222,7 @@ FILE* OpenDump(const Dump& dump, const char* name, u32 freq, u32 channels, bool 
     std::snprintf(text, sizeof text, "%s %s (%u Hz, %u ch, %s)",
                   file != nullptr ? "dumping to" : "cannot open", path, freq, channels,
                   isFloat ? "float32" : "int16");
-    std::fprintf(stderr, "[AudioOut] %s\n", text);
-    std::fflush(stderr);
+    ORBIS_LOG_STDERR("[AudioOut] %s\n", text);
     if (file != nullptr) {
         WriteWavHeader(file, freq, channels, isFloat, 0);
     }
@@ -403,8 +405,7 @@ void PollFlightTrigger(State& state) {
     }
     const char* rootEnv = std::getenv("ORBIS_AUDIO_FLIGHT_DIR");
     const std::filesystem::path folder = std::filesystem::path(rootEnv != nullptr ? rootEnv : "anyps4/audio_dumps") / ("flight-" + std::to_string(stamp));
-    std::fprintf(stderr, "[AudioOut] flight recorder triggered: writing %zu rings to %s\n", copies.size(), folder.string().c_str());
-    std::fflush(stderr);
+    ORBIS_LOG_STDERR("[AudioOut] flight recorder triggered: writing %zu rings to %s\n", copies.size(), folder.string().c_str());
     std::thread([folder, copies = std::move(copies)]() {
         std::error_code createError;
         std::filesystem::create_directories(folder, createError);
@@ -412,8 +413,7 @@ void PollFlightTrigger(State& state) {
         if (levels == nullptr) return;
         for (const auto& [ring, data] : copies) WriteFlightRing(folder, ring, data, levels);
         std::fclose(levels);
-        std::fprintf(stderr, "[AudioOut] flight recorder: wrote %s\n", folder.string().c_str());
-        std::fflush(stderr);
+        ORBIS_LOG_STDERR("[AudioOut] flight recorder: wrote %s\n", folder.string().c_str());
     }).detach();
 }
 
@@ -428,8 +428,7 @@ void Trace(const char* function, const char* nid) {
 }
 
 void Log(const char* text) {
-    std::fprintf(stderr, "[AudioOut] %s\n", text);
-    std::fflush(stderr);
+    ORBIS_LOG_STDERR("[AudioOut] %s\n", text);
 }
 
 Port* GetPort(s32 handle) {
@@ -690,6 +689,9 @@ s32 Output(s32 handle, const void* data) {
     RecordPortChunk(state, *port, handle, data);
     ConvertChunk(*port, data);
     ++port->outputs;
+    // One chunk accepted on the primary port is one audio cycle; NGS2 produces one grain per voice per cycle.
+    if (state.primaryHandle < 0) state.primaryHandle = handle;
+    if (handle == state.primaryHandle) anyps4::LiveOutputCycleAdvance();
     Report(state, *port, handle);
     return static_cast<s32>(port->samples);
 }
@@ -746,6 +748,7 @@ ORBIS_SYSV_ABI s32 orbis_sceAudioOutClose(s32 handle) {
     std::lock_guard guard(state.lock);
     Port* port = GetPort(handle);
     if (port == nullptr) return kErrorInvalidPort;
+    if (handle == state.primaryHandle) state.primaryHandle = -1;
     *port = Port{};
     return 0;
 }

@@ -124,8 +124,7 @@ void Trace(const char* function, const char* nid) {
 }
 
 void Log(const char* text) {
-    std::fprintf(stderr, "[VideoOut] %s\n", text);
-    std::fflush(stderr);
+    ORBIS_LOG_STDERR("[VideoOut] %s\n", text);
 }
 
 u64 ProcessTimeMicroseconds() {

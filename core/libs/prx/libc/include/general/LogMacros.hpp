@@ -3,8 +3,18 @@
 
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
+
+// ORBIS_LOG=off (or 0) silences every APS5_LOG_* line before it is formatted. The launcher sets it when Diagnostics is off.
+inline bool LoggingEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("ORBIS_LOG");
+        return value == nullptr || (std::strcmp(value, "off") != 0 && std::strcmp(value, "0") != 0);
+    }();
+    return enabled;
+}
 
 #ifdef __MINGW_PRINTF_FORMAT
 [[gnu::format(__MINGW_PRINTF_FORMAT, 2, 3)]]
@@ -12,6 +22,7 @@
 [[gnu::format(printf, 2, 3)]]
 #endif
 inline int WriteLogLine(std::FILE* stream, const char* format, ...) {
+    if (!LoggingEnabled()) return 0;
     char small[1024];
     std::va_list arguments;
     va_start(arguments, format);

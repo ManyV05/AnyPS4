@@ -87,9 +87,12 @@ bool StartDetached(const std::wstring& executable, const std::wstring& workingDi
     startup.cb = sizeof startup;
     HANDLE log = INVALID_HANDLE_VALUE;
     BOOL inherit = FALSE;
-    if (!logFile.empty()) {
+    {
+        // An empty log file name means no logging at all: the game's output goes to the NUL device, so nothing is
+        // written to disk and no console window appears.
         SECURITY_ATTRIBUTES attributes{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
-        log = CreateFileW(logFile.c_str(), GENERIC_WRITE, FILE_SHARE_READ, &attributes, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        log = logFile.empty() ? CreateFileW(L"NUL", GENERIC_WRITE, FILE_SHARE_WRITE, &attributes, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr)
+                              : CreateFileW(logFile.c_str(), GENERIC_WRITE, FILE_SHARE_READ, &attributes, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (log != INVALID_HANDLE_VALUE) {
             startup.dwFlags = STARTF_USESTDHANDLES;
             startup.hStdOutput = log;
