@@ -317,6 +317,59 @@ bool FoldPackedAncillary(IR::Block& block, IR::Inst& inst) {
     return true;
 }
 
+// Shaders that pack data into UNORM texture channels recover a byte with
+// `v_cvt_u32_f32(255.0 * sample)`, which truncates. On GCN a bilinear sample that lands on a texel
+// centre returns the texel exactly, but host GPUs may blend in a tiny fraction of the neighbouring
+// texel for the same coordinates. The product then ends up slightly below the stored byte and the
+// truncating conversion returns the byte below it. Round to nearest for this exact pattern, which
+// does not change the result for exact texel values.
+static bool IsImageSampleComponent(const IR::Value& value) {
+    if (value.IsImmediate()) {
+        return false;
+    }
+    const IR::Inst* extract = value.InstRecursive();
+    switch (extract->GetOpcode()) {
+    case IR::Opcode::CompositeExtractF32x2:
+    case IR::Opcode::CompositeExtractF32x3:
+    case IR::Opcode::CompositeExtractF32x4:
+        break;
+    default:
+        return false;
+    }
+    if (extract->Arg(0).IsImmediate()) {
+        return false;
+    }
+    switch (extract->Arg(0).InstRecursive()->GetOpcode()) {
+    case IR::Opcode::ImageSampleImplicitLod:
+    case IR::Opcode::ImageSampleExplicitLod:
+    case IR::Opcode::ImageSampleRaw:
+        return true;
+    default:
+        return false;
+    }
+}
+
+void RoundUnormByteReconstruction(IR::Block& block, IR::Inst& inst) {
+    const IR::Value value = inst.Arg(0);
+    if (value.IsImmediate()) {
+        return;
+    }
+    const IR::Inst* mul = value.InstRecursive();
+    if (mul->GetOpcode() != IR::Opcode::FPMul32) {
+        return;
+    }
+    const auto is_255 = [](const IR::Value& v) {
+        return v.IsImmediate() && v.Type() == IR::Type::F32 && v.F32() == 255.0f;
+    };
+    const bool match = (is_255(mul->Arg(0)) && IsImageSampleComponent(mul->Arg(1))) ||
+                       (is_255(mul->Arg(1)) && IsImageSampleComponent(mul->Arg(0)));
+    if (!match) {
+        return;
+    }
+    IR::IREmitter ir{block, IR::Block::InstructionList::s_iterator_to(inst)};
+    inst.SetArg(0, ir.FPAdd(IR::F32{value}, ir.Imm32(0.5f)));
+}
+
 void ConstantPropagation(IR::Block& block, IR::Inst& inst) {
     switch (inst.GetOpcode()) {
     case IR::Opcode::IAdd32:
@@ -327,6 +380,8 @@ void ConstantPropagation(IR::Block& block, IR::Inst& inst) {
     case IR::Opcode::ConvertF32U32:
         FoldWhenAllImmediates(inst, [](u32 a) { return static_cast<float>(a); });
         return;
+    case IR::Opcode::ConvertU32F32:
+        return RoundUnormByteReconstruction(block, inst);
     case IR::Opcode::IMul32:
         FoldMul<u32>(block, inst);
         return;
